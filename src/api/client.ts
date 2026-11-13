@@ -1,9 +1,18 @@
 import type {
   AgentMemoryEntry,
+  CrossVenueOpportunityRecord,
+  CrossVenuePairRecord,
+  CrossVenuePairRegisterResponse,
+  CrossVenueScanResponse,
   DashboardPayload,
   HealthPayload,
+  KalshiBookSnapshotResponse,
+  KalshiMarketsListResponse,
   KillSwitchState,
   MarketBookSnapshotResponse,
+  PaperBlotterResponse,
+  PaperExecuteResponse,
+  PaperExecutionScenario,
   RiskAuditEntry,
   RiskEvalResponse,
   ScanResponse,
@@ -79,4 +88,65 @@ export const certaintyApi = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  getKalshiMarkets: (limit = 15) =>
+    apiFetch<KalshiMarketsListResponse>(`/api/kalshi/markets?limit=${limit}`),
+
+  getKalshiBook: (ticker: string, depth = 15) =>
+    apiFetch<KalshiBookSnapshotResponse>(
+      `/api/kalshi/markets/${encodeURIComponent(ticker)}/book?depth=${depth}`
+    ),
+
+  getCrossVenuePairs: (limit = 100) =>
+    apiFetch<{ count: number; items: CrossVenuePairRecord[] }>(
+      `/api/cross-venue/pairs?limit=${limit}`
+    ),
+
+  registerCrossVenuePair: (payload: {
+    pair_id?: string;
+    poly_market_id: string;
+    kalshi_ticker: string;
+    resolution_source_verified: boolean;
+    predicate_verified: boolean;
+    polarity_inverted: boolean;
+    void_rules_compatible: boolean;
+    allow_early_close_variance: boolean;
+    notes?: string;
+  }) =>
+    apiFetch<CrossVenuePairRegisterResponse>('/api/cross-venue/pairs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  getCrossVenueOpportunities: (limit = 100) =>
+    apiFetch<{ count: number; items: CrossVenueOpportunityRecord[] }>(
+      `/api/cross-venue/opportunities?limit=${limit}`
+    ),
+
+  scanCrossVenue: (payload: {
+    pair_id?: string;
+    target_shares: number;
+    slippage_buffer_bps: number;
+  }) =>
+    apiFetch<CrossVenueScanResponse>('/api/cross-venue/scan', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  executePaperTrade: (payload: {
+    pair_id: string;
+    direction?: 'POLY_YES_KALSHI_NO' | 'KALSHI_YES_POLY_NO';
+    target_shares: number;
+    slippage_buffer_bps?: number;
+    max_leg_slippage_bps?: number;
+    scenario?: PaperExecutionScenario;
+    ai_suggested_override?: boolean;
+  }) =>
+    apiFetch<PaperExecuteResponse>('/api/paper/execute', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  getPaperBlotter: (limit = 100) =>
+    apiFetch<PaperBlotterResponse>(`/api/paper/blotter?limit=${limit}`),
 };

@@ -183,6 +183,15 @@ class PolymarketReadOnlyClient:
                 break
         return markets
 
+    async def fetch_market(self, market_id: str) -> PolymarketBinaryMarket | None:
+        async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=self.timeout_s) as client:
+            resp = await client.get(f"{GAMMA_BASE_URL}/markets/{market_id}")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            raw = resp.json()
+        return parse_gamma_binary_market(raw)
+
     async def fetch_order_book(self, token_id: str) -> PolymarketBookSnapshot:
         async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=self.timeout_s) as client:
             resp = await client.get(f"{CLOB_BASE_URL}/book", params={"token_id": token_id})

@@ -133,6 +133,152 @@ class DuckDBStore:
                 )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cross_venue_pairs (
+                    pair_id VARCHAR PRIMARY KEY,
+                    poly_market_id VARCHAR NOT NULL,
+                    poly_question VARCHAR NOT NULL,
+                    kalshi_ticker VARCHAR NOT NULL,
+                    kalshi_title VARCHAR NOT NULL,
+                    resolution_source_verified BOOLEAN NOT NULL,
+                    predicate_verified BOOLEAN NOT NULL,
+                    polarity_inverted BOOLEAN NOT NULL,
+                    void_rules_compatible BOOLEAN NOT NULL,
+                    allow_early_close_variance BOOLEAN NOT NULL,
+                    identical_settlement_verified BOOLEAN NOT NULL,
+                    settlement_status VARCHAR NOT NULL,
+                    mismatch_reasons_json VARCHAR NOT NULL,
+                    cutoff_delta_hours DOUBLE,
+                    notes VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cross_venue_opportunities (
+                    xopp_id VARCHAR PRIMARY KEY,
+                    scan_id VARCHAR NOT NULL,
+                    pair_id VARCHAR NOT NULL,
+                    poly_market_id VARCHAR NOT NULL,
+                    kalshi_ticker VARCHAR NOT NULL,
+                    question VARCHAR NOT NULL,
+                    direction VARCHAR NOT NULL,
+                    leg1_venue VARCHAR NOT NULL,
+                    leg1_outcome VARCHAR NOT NULL,
+                    leg2_venue VARCHAR NOT NULL,
+                    leg2_outcome VARCHAR NOT NULL,
+                    target_shares DOUBLE NOT NULL,
+                    leg1_vwap DOUBLE,
+                    leg2_vwap DOUBLE,
+                    combined_raw_cost DOUBLE,
+                    total_fees_usd DOUBLE NOT NULL,
+                    slippage_buffer_usd DOUBLE NOT NULL,
+                    total_executable_cost DOUBLE,
+                    gross_edge_pct DOUBLE,
+                    net_edge_pct DOUBLE,
+                    liquidity_participation_pct DOUBLE NOT NULL,
+                    leg_imbalance_ratio DOUBLE NOT NULL,
+                    executable BOOLEAN NOT NULL,
+                    identical_settlement_verified BOOLEAN NOT NULL,
+                    settlement_status VARCHAR NOT NULL,
+                    risk_gate_approved BOOLEAN NOT NULL,
+                    risk_gate_reason VARCHAR NOT NULL,
+                    risk_audit_id VARCHAR NOT NULL,
+                    data_age_ms BIGINT NOT NULL,
+                    route_a_net_edge_pct DOUBLE,
+                    route_b_net_edge_pct DOUBLE,
+                    provenance VARCHAR NOT NULL,
+                    evaluated_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_orders (
+                    order_id VARCHAR PRIMARY KEY,
+                    execution_id VARCHAR NOT NULL,
+                    pair_id VARCHAR NOT NULL,
+                    audit_id VARCHAR NOT NULL,
+                    leg_number INTEGER NOT NULL,
+                    venue VARCHAR NOT NULL,
+                    market_ref VARCHAR NOT NULL,
+                    side VARCHAR NOT NULL,
+                    outcome VARCHAR NOT NULL,
+                    order_type VARCHAR NOT NULL,
+                    requested_shares DOUBLE NOT NULL,
+                    filled_shares DOUBLE NOT NULL,
+                    limit_price DOUBLE NOT NULL,
+                    avg_fill_price DOUBLE,
+                    fees_usd DOUBLE NOT NULL,
+                    latency_ms INTEGER NOT NULL,
+                    status VARCHAR NOT NULL,
+                    reason VARCHAR NOT NULL,
+                    provenance VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_fills (
+                    fill_id VARCHAR PRIMARY KEY,
+                    execution_id VARCHAR NOT NULL,
+                    order_id VARCHAR NOT NULL,
+                    venue VARCHAR NOT NULL,
+                    market_ref VARCHAR NOT NULL,
+                    side VARCHAR NOT NULL,
+                    outcome VARCHAR NOT NULL,
+                    shares DOUBLE NOT NULL,
+                    fill_price DOUBLE NOT NULL,
+                    notional_usd DOUBLE NOT NULL,
+                    fee_usd DOUBLE NOT NULL,
+                    is_unwind BOOLEAN NOT NULL,
+                    provenance VARCHAR NOT NULL,
+                    filled_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_positions (
+                    position_id VARCHAR PRIMARY KEY,
+                    execution_id VARCHAR NOT NULL,
+                    pair_id VARCHAR NOT NULL,
+                    venue VARCHAR NOT NULL,
+                    market_ref VARCHAR NOT NULL,
+                    outcome VARCHAR NOT NULL,
+                    shares DOUBLE NOT NULL,
+                    entry_price DOUBLE NOT NULL,
+                    notional_usd DOUBLE NOT NULL,
+                    locked_payout_usd DOUBLE NOT NULL,
+                    status VARCHAR NOT NULL,
+                    provenance VARCHAR NOT NULL,
+                    updated_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_pnl_ledger (
+                    ledger_id VARCHAR PRIMARY KEY,
+                    execution_id VARCHAR NOT NULL,
+                    pair_id VARCHAR NOT NULL,
+                    event_type VARCHAR NOT NULL,
+                    outcome_status VARCHAR NOT NULL,
+                    matched_shares DOUBLE NOT NULL,
+                    unwound_shares DOUBLE NOT NULL,
+                    gross_cost_usd DOUBLE NOT NULL,
+                    fees_usd DOUBLE NOT NULL,
+                    realized_pnl_usd DOUBLE NOT NULL,
+                    locked_arb_edge_usd DOUBLE NOT NULL,
+                    notes VARCHAR NOT NULL,
+                    provenance VARCHAR NOT NULL,
+                    recorded_at VARCHAR NOT NULL
+                )
+                """
+            )
 
     def _seed_initial_memory_if_empty(self) -> None:
         with self._lock:
@@ -438,17 +584,353 @@ class DuckDBStore:
             cols = [d[0] for d in self._conn.description]
             return [dict(zip(cols, r)) for r in rows]
 
+    def upsert_cross_venue_pair(self, pair: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO cross_venue_pairs VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                ON CONFLICT (pair_id) DO UPDATE SET
+                    poly_market_id = excluded.poly_market_id,
+                    poly_question = excluded.poly_question,
+                    kalshi_ticker = excluded.kalshi_ticker,
+                    kalshi_title = excluded.kalshi_title,
+                    resolution_source_verified = excluded.resolution_source_verified,
+                    predicate_verified = excluded.predicate_verified,
+                    polarity_inverted = excluded.polarity_inverted,
+                    void_rules_compatible = excluded.void_rules_compatible,
+                    allow_early_close_variance = excluded.allow_early_close_variance,
+                    identical_settlement_verified = excluded.identical_settlement_verified,
+                    settlement_status = excluded.settlement_status,
+                    mismatch_reasons_json = excluded.mismatch_reasons_json,
+                    cutoff_delta_hours = excluded.cutoff_delta_hours,
+                    notes = excluded.notes
+                """,
+                [
+                    pair["pair_id"],
+                    pair["poly_market_id"],
+                    pair["poly_question"],
+                    pair["kalshi_ticker"],
+                    pair["kalshi_title"],
+                    bool(pair["resolution_source_verified"]),
+                    bool(pair["predicate_verified"]),
+                    bool(pair["polarity_inverted"]),
+                    bool(pair["void_rules_compatible"]),
+                    bool(pair["allow_early_close_variance"]),
+                    bool(pair["identical_settlement_verified"]),
+                    pair["settlement_status"],
+                    json.dumps(list(pair.get("mismatch_reasons", []))),
+                    pair.get("cutoff_delta_hours"),
+                    pair.get("notes", ""),
+                    pair["created_at"],
+                ],
+            )
+        return pair
+
+    def list_cross_venue_pairs(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM cross_venue_pairs ORDER BY created_at DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            out = []
+            for r in rows:
+                d = dict(zip(cols, r))
+                d["mismatch_reasons"] = json.loads(d.pop("mismatch_reasons_json", "[]"))
+                out.append(d)
+            return out
+
+    def get_cross_venue_pair(self, pair_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM cross_venue_pairs WHERE pair_id = ?", [pair_id]
+            ).fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in self._conn.description]
+            d = dict(zip(cols, row))
+            d["mismatch_reasons"] = json.loads(d.pop("mismatch_reasons_json", "[]"))
+            return d
+
+    def record_cross_venue_opportunity(self, opp: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO cross_venue_opportunities VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    opp["xopp_id"],
+                    opp["scan_id"],
+                    opp["pair_id"],
+                    opp["poly_market_id"],
+                    opp["kalshi_ticker"],
+                    opp["question"],
+                    opp["direction"],
+                    opp["leg1_venue"],
+                    opp["leg1_outcome"],
+                    opp["leg2_venue"],
+                    opp["leg2_outcome"],
+                    float(opp["target_shares"]),
+                    opp.get("leg1_vwap"),
+                    opp.get("leg2_vwap"),
+                    opp.get("combined_raw_cost"),
+                    float(opp["total_fees_usd"]),
+                    float(opp["slippage_buffer_usd"]),
+                    opp.get("total_executable_cost"),
+                    opp.get("gross_edge_pct"),
+                    opp.get("net_edge_pct"),
+                    float(opp["liquidity_participation_pct"]),
+                    float(opp["leg_imbalance_ratio"]),
+                    bool(opp["executable"]),
+                    bool(opp["identical_settlement_verified"]),
+                    opp["settlement_status"],
+                    bool(opp["risk_gate_approved"]),
+                    opp["risk_gate_reason"],
+                    opp["risk_audit_id"],
+                    int(opp["data_age_ms"]),
+                    opp.get("route_a_net_edge_pct"),
+                    opp.get("route_b_net_edge_pct"),
+                    opp.get("provenance", "LIVE"),
+                    opp["evaluated_at"],
+                ],
+            )
+
+    def list_cross_venue_opportunities(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM cross_venue_opportunities ORDER BY evaluated_at DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+    def record_paper_order(self, order: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO paper_orders VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    order["order_id"],
+                    order["execution_id"],
+                    order["pair_id"],
+                    order["audit_id"],
+                    int(order["leg_number"]),
+                    order["venue"],
+                    order["market_ref"],
+                    order["side"],
+                    order["outcome"],
+                    order["order_type"],
+                    float(order["requested_shares"]),
+                    float(order["filled_shares"]),
+                    float(order["limit_price"]),
+                    order.get("avg_fill_price"),
+                    float(order["fees_usd"]),
+                    int(order["latency_ms"]),
+                    order["status"],
+                    order["reason"],
+                    "SIMULATED",
+                    order["created_at"],
+                ],
+            )
+
+    def record_paper_fill(self, fill: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO paper_fills VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    fill["fill_id"],
+                    fill["execution_id"],
+                    fill["order_id"],
+                    fill["venue"],
+                    fill["market_ref"],
+                    fill["side"],
+                    fill["outcome"],
+                    float(fill["shares"]),
+                    float(fill["fill_price"]),
+                    float(fill["notional_usd"]),
+                    float(fill["fee_usd"]),
+                    bool(fill["is_unwind"]),
+                    "SIMULATED",
+                    fill["filled_at"],
+                ],
+            )
+
+    def record_paper_position(self, pos: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO paper_positions VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    pos["position_id"],
+                    pos["execution_id"],
+                    pos["pair_id"],
+                    pos["venue"],
+                    pos["market_ref"],
+                    pos["outcome"],
+                    float(pos["shares"]),
+                    float(pos["entry_price"]),
+                    float(pos["notional_usd"]),
+                    float(pos["locked_payout_usd"]),
+                    pos["status"],
+                    "SIMULATED",
+                    pos["updated_at"],
+                ],
+            )
+
+    def record_paper_pnl(self, entry: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO paper_pnl_ledger VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    entry["ledger_id"],
+                    entry["execution_id"],
+                    entry["pair_id"],
+                    entry["event_type"],
+                    entry["outcome_status"],
+                    float(entry["matched_shares"]),
+                    float(entry["unwound_shares"]),
+                    float(entry["gross_cost_usd"]),
+                    float(entry["fees_usd"]),
+                    float(entry["realized_pnl_usd"]),
+                    float(entry["locked_arb_edge_usd"]),
+                    entry["notes"],
+                    "SIMULATED",
+                    entry["recorded_at"],
+                ],
+            )
+
+    def list_paper_orders(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM paper_orders ORDER BY created_at DESC LIMIT ?", [limit]
+            ).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+    def list_paper_fills(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM paper_fills ORDER BY filled_at DESC LIMIT ?", [limit]
+            ).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+    def list_paper_positions(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM paper_positions ORDER BY updated_at DESC LIMIT ?", [limit]
+            ).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+    def list_paper_pnl(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM paper_pnl_ledger ORDER BY recorded_at DESC LIMIT ?", [limit]
+            ).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+    def get_paper_venue_exposures(self) -> dict[str, float]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT LOWER(venue) AS v, COALESCE(SUM(notional_usd), 0.0) AS exp
+                FROM paper_positions
+                WHERE status IN ('OPEN_HEDGED', 'OPEN_UNHEDGED')
+                GROUP BY LOWER(venue)
+                """
+            ).fetchall()
+            exposures = {"polymarket": 0.0, "kalshi": 0.0}
+            for venue_name, exp in rows:
+                exposures[str(venue_name)] = round(float(exp or 0.0), 4)
+            return exposures
+
+    def get_daily_tier1_simulated_pnl_usd(self) -> float:
+        with self._lock:
+            today_prefix = datetime.now(timezone.utc).date().isoformat()
+            row = self._conn.execute(
+                """
+                SELECT COALESCE(SUM(realized_pnl_usd), 0.0)
+                FROM paper_pnl_ledger
+                WHERE SUBSTR(recorded_at, 1, 10) = ?
+                """,
+                [today_prefix],
+            ).fetchone()
+            return round(float(row[0] or 0.0), 4) if row else 0.0
+
+    def get_daily_tier1_simulated_loss_usd(self) -> float:
+        """Return positive loss magnitude today (>= 0.0) for Risk Gate daily loss limit enforcement."""
+        pnl = self.get_daily_tier1_simulated_pnl_usd()
+        return round(max(0.0, -pnl), 4)
+
+    def get_paper_summary(self) -> dict[str, Any]:
+        with self._lock:
+            exposures = self.get_paper_venue_exposures()
+            daily_realized = self.get_daily_tier1_simulated_pnl_usd()
+            row = self._conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS executions,
+                    COALESCE(SUM(realized_pnl_usd), 0.0) AS total_realized_pnl_usd,
+                    COALESCE(SUM(locked_arb_edge_usd), 0.0) AS total_locked_arb_edge_usd,
+                    COALESCE(SUM(fees_usd), 0.0) AS total_fees_usd,
+                    COALESCE(SUM(matched_shares), 0.0) AS total_matched_shares,
+                    COALESCE(SUM(unwound_shares), 0.0) AS total_unwound_shares
+                FROM paper_pnl_ledger
+                """
+            ).fetchone()
+            return {
+                "provenance": "SIMULATED",
+                "venue_exposures": exposures,
+                "deployed_exposure_usd": round(sum(exposures.values()), 4),
+                "daily_simulated_pnl_usd": daily_realized,
+                "daily_simulated_loss_usd": round(max(0.0, -daily_realized), 4),
+                "executions": int(row[0] or 0),
+                "total_realized_pnl_usd": round(float(row[1] or 0.0), 4),
+                "total_locked_arb_edge_usd": round(float(row[2] or 0.0), 4),
+                "total_fees_usd": round(float(row[3] or 0.0), 4),
+                "total_matched_shares": round(float(row[4] or 0.0), 4),
+                "total_unwound_shares": round(float(row[5] or 0.0), 4),
+            }
+
     def get_counts(self) -> dict[str, int]:
         with self._lock:
             snaps = self._conn.execute("SELECT COUNT(*) FROM market_snapshots").fetchone()[0]
             opps = self._conn.execute("SELECT COUNT(*) FROM arbitrage_opportunities").fetchone()[0]
             audits = self._conn.execute("SELECT COUNT(*) FROM risk_gate_audit").fetchone()[0]
             memories = self._conn.execute("SELECT COUNT(*) FROM agent_memory").fetchone()[0]
+            xpairs = self._conn.execute("SELECT COUNT(*) FROM cross_venue_pairs").fetchone()[0]
+            xopps = self._conn.execute("SELECT COUNT(*) FROM cross_venue_opportunities").fetchone()[0]
+            porders = self._conn.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0]
+            pfills = self._conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0]
             return {
                 "snapshots": int(snaps),
                 "opportunities": int(opps),
                 "audits": int(audits),
                 "memories": int(memories),
+                "cross_venue_pairs": int(xpairs),
+                "cross_venue_opportunities": int(xopps),
+                "paper_orders": int(porders),
+                "paper_fills": int(pfills),
             }
 
     def close(self) -> None:

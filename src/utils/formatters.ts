@@ -144,3 +144,23 @@ export function getRiskDryRunPreset(
       return base;
   }
 }
+
+export function summarizeExecutionOutcome(status: string): {
+  label: string;
+  toneClass: string;
+} {
+  switch (status) {
+    case 'HEDGED_FULL_FILL':
+      return { label: 'HEDGED (FULL)', toneClass: 'text-emerald-400' };
+    case 'HEDGED_PARTIAL_LEG1':
+      return { label: 'HEDGED (PARTIAL LEG 1)', toneClass: 'text-sky-400' };
+    case 'PARTIAL_HEDGE_WITH_UNWIND':
+      return { label: 'PARTIAL + UNWIND', toneClass: 'text-amber-400' };
+    case 'UNWOUND_SECOND_LEG_FAILURE':
+      return { label: 'UNWOUND (LEG 2 FAIL)', toneClass: 'text-amber-300' };
+    case 'REJECTED_BY_RISK_GATE':
+      return { label: 'DENIED BY RISK GATE', toneClass: 'text-rose-400' };
+    default:
+      return { label: status, toneClass: 'text-slate-300' };
+  }
+}

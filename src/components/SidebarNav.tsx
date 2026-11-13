@@ -1,6 +1,6 @@
-import { Activity, BookOpen, Layers, ShieldAlert } from 'lucide-react';
+import { Activity, ArrowLeftRight, BookOpen, Layers, ShieldAlert } from 'lucide-react';
 
-export type WorkspaceTab = 'command' | 'scanner' | 'risk' | 'architecture';
+export type WorkspaceTab = 'command' | 'scanner' | 'cross_venue' | 'risk' | 'architecture';
 
 interface SidebarNavProps {
   activeTab: WorkspaceTab;
@@ -27,6 +27,12 @@ const NAV_ITEMS: Array<{
     label: 'Scanner & Depth',
     subtitle: 'Polymarket CLOB V2 books',
     Icon: Layers,
+  },
+  {
+    id: 'cross_venue',
+    label: 'Cross-Venue & Paper',
+    subtitle: 'Kalshi matcher & simulator',
+    Icon: ArrowLeftRight,
   },
   {
     id: 'risk',
@@ -58,7 +64,7 @@ export function SidebarNav({
               The Certainty Stack
             </div>
             <div className="mt-0.5 lg:mt-1 text-xs text-slate-400">
-              Phase 1 · Read-Only Research
+              Phase 2 · Read-Only + Paper Sim
             </div>
           </div>
           <span

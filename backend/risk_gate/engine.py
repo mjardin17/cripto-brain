@@ -24,6 +24,9 @@ class RiskEvaluationRequest(BaseModel):
     market_id: str
     requested_notional_usd: float
     current_venue_exposure_usd: float = 0.0
+    secondary_venue: str | None = None
+    secondary_requested_notional_usd: float = 0.0
+    secondary_venue_exposure_usd: float = 0.0
     daily_tier_loss_usd: float = 0.0
     net_edge_pct: float | None
     liquidity_participation_pct: float
@@ -101,14 +104,35 @@ class DeterministicRiskGate:
 
         # 4. Venue & arbitrage type check
         venue_norm = req.venue.strip().lower()
-        venue_ok = venue_norm in self.policy.enabled_venues and req.arbitrage_type == "intra_venue"
+        sec_norm = req.secondary_venue.strip().lower() if req.secondary_venue else None
+        if req.arbitrage_type == "intra_venue":
+            venue_ok = venue_norm in self.policy.enabled_venues and sec_norm is None
+            venue_detail = (
+                f"Intra-venue '{venue_norm}' scope verified"
+                if venue_ok
+                else f"Venue '{req.venue}' invalid for intra-venue scope"
+            )
+        else:
+            # Cross-venue requires enabled primary venue and (if supplied) distinct enabled secondary venue
+            if sec_norm is not None:
+                venue_ok = (
+                    venue_norm in self.policy.enabled_venues
+                    and sec_norm in self.policy.enabled_venues
+                    and venue_norm != sec_norm
+                )
+            else:
+                venue_ok = venue_norm in self.policy.enabled_venues
+            venue_detail = (
+                f"Cross-venue scope verified ({venue_norm}"
+                + (f" <-> {sec_norm})" if sec_norm else ")")
+                if venue_ok
+                else f"Cross-venue pair ({req.venue}, {req.secondary_venue}) not authorized"
+            )
         checks.append(
             RuleCheckResult(
                 rule_id="VENUE_AND_ARBITRAGE_SCOPE",
                 passed=venue_ok,
-                detail="Intra-venue Polymarket scope verified"
-                if venue_ok
-                else f"Venue '{req.venue}' / type '{req.arbitrage_type}' not authorized in Phase 1",
+                detail=venue_detail,
             )
         )
 
@@ -128,6 +152,8 @@ class DeterministicRiskGate:
         numeric_inputs = [
             req.requested_notional_usd,
             req.current_venue_exposure_usd,
+            req.secondary_requested_notional_usd,
+            req.secondary_venue_exposure_usd,
             req.daily_tier_loss_usd,
             req.liquidity_participation_pct,
             req.leg_imbalance_ratio,
@@ -138,6 +164,7 @@ class DeterministicRiskGate:
             and math.isfinite(req.net_edge_pct)
             and all(math.isfinite(v) for v in numeric_inputs)
             and req.requested_notional_usd > 0
+            and req.secondary_requested_notional_usd >= 0
         )
         checks.append(
             RuleCheckResult(
@@ -202,17 +229,29 @@ class DeterministicRiskGate:
             )
         )
 
-        # 11. Venue exposure cap
+        # 11. Venue exposure cap (enforced on primary venue and, if cross-venue, secondary venue)
         venue_cap = self.policy.max_venue_exposure_usd.get(venue_norm, 0.0)
         projected_exposure = req.current_venue_exposure_usd + max(req.requested_notional_usd, 0.0)
-        exposure_ok = projected_exposure <= venue_cap and req.current_venue_exposure_usd >= 0.0
+        primary_ok = projected_exposure <= venue_cap and req.current_venue_exposure_usd >= 0.0
+
+        secondary_ok = True
+        sec_detail = ""
+        if sec_norm is not None:
+            sec_cap = self.policy.max_venue_exposure_usd.get(sec_norm, 0.0)
+            sec_proj = req.secondary_venue_exposure_usd + max(req.secondary_requested_notional_usd, 0.0)
+            secondary_ok = sec_proj <= sec_cap and req.secondary_venue_exposure_usd >= 0.0
+            sec_detail = f"; {sec_norm} ${sec_proj:.2f} <= ${sec_cap:.2f}"
+
+        exposure_ok = primary_ok and secondary_ok
         checks.append(
             RuleCheckResult(
                 rule_id="MAX_VENUE_EXPOSURE",
                 passed=exposure_ok,
-                detail=f"Projected exposure ${projected_exposure:.2f} <= ${venue_cap:.2f}"
-                if exposure_ok
-                else f"Projected exposure ${projected_exposure:.2f} exceeds venue cap ${venue_cap:.2f}",
+                detail=(
+                    f"Projected {venue_norm} ${projected_exposure:.2f} <= ${venue_cap:.2f}{sec_detail}"
+                    if exposure_ok
+                    else f"Projected venue exposure breaches cap ({venue_norm} ${projected_exposure:.2f}/${venue_cap:.2f}{sec_detail})"
+                ),
             )
         )
 

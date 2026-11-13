@@ -1,4 +1,4 @@
-"""Immutable Risk Gate policy thresholds for Phase 1."""
+"""Immutable Risk Gate policy thresholds (Phase 2 — Polymarket + Kalshi Paper)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ class RiskPolicy(BaseModel, frozen=True):
         default=10.0, description="Maximum 10.0% participation in available thinner-leg depth"
     )
     max_venue_exposure_usd: dict[str, float] = Field(
-        default_factory=lambda: {"polymarket": 2500.0, "kalshi": 0.0}
+        default_factory=lambda: {"polymarket": 2500.0, "kalshi": 2500.0}
     )
     daily_loss_limits_usd: dict[str, float] = Field(
         default_factory=lambda: {"tier1": 250.0, "tier2": 0.0, "tier3": 0.0}
@@ -30,7 +30,7 @@ class RiskPolicy(BaseModel, frozen=True):
         default=5.0, description="Maximum ratio between YES and NO top-of-book depths"
     )
     live_trading_enabled: bool = Field(
-        default=False, description="Hard lock disabling live order submission in Phase 1"
+        default=False, description="Hard lock disabling live order submission permanently in Phase 2"
     )
     enabled_tiers: tuple[str, ...] = ("tier1",)
-    enabled_venues: tuple[str, ...] = ("polymarket",)
+    enabled_venues: tuple[str, ...] = ("polymarket", "kalshi")

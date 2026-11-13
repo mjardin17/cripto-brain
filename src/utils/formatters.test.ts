@@ -7,6 +7,7 @@ import {
   formatPrice,
   formatUsd,
   getRiskDryRunPreset,
+  summarizeExecutionOutcome,
 } from './formatters';
 import type { ArbitrageOpportunity } from '../types/certainty';
 
@@ -81,9 +82,12 @@ test('opportunity filter handles search query and Risk Gate approval status', ()
   assert.equal(filterOpportunities(sampleOpps, 'fed', 'ALL')[0]?.market_id, '202');
 });
 
-test('provenance descriptor and Risk Gate dry-run presets behave deterministically', () => {
+test('provenance descriptor, execution outcome formatter, and dry-run presets behave deterministically', () => {
   assert.equal(describeProvenance('LIVE').label, 'LIVE');
+  assert.equal(describeProvenance('SIMULATED').label, 'SIMULATED');
   assert.equal(describeProvenance('UNAVAILABLE').label, 'UNAVAILABLE');
+  assert.equal(summarizeExecutionOutcome('UNWOUND_SECOND_LEG_FAILURE').label, 'UNWOUND (LEG 2 FAIL)');
+  assert.equal(summarizeExecutionOutcome('REJECTED_BY_RISK_GATE').label, 'DENIED BY RISK GATE');
   const aiPreset = getRiskDryRunPreset('AI_OVERRIDE');
   assert.equal(aiPreset.ai_suggested_override, true);
   const livePreset = getRiskDryRunPreset('LIVE_ATTEMPT');

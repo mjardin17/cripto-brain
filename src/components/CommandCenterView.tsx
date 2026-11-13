@@ -26,7 +26,7 @@ interface CommandCenterViewProps {
   scanning: boolean;
   onSelectMarket: (marketId: string) => void;
   onRunScan: () => void;
-  onNavigateTab: (tab: 'risk' | 'scanner' | 'architecture') => void;
+  onNavigateTab: (tab: 'risk' | 'scanner' | 'cross_venue' | 'architecture') => void;
 }
 
 export function CommandCenterView({
@@ -52,7 +52,9 @@ export function CommandCenterView({
 
   const approvedCount = opportunities.filter((o) => o.risk_gate_approved).length;
   const polyHealth = health?.venues.polymarket;
+  const kalshiHealth = health?.venues.kalshi;
   const killActive = dashboard.risk_gate.kill_switch.active;
+  const dailyPnl = dashboard.portfolio.daily_simulated_pnl_usd;
 
   return (
     <div className="space-y-6">
@@ -67,33 +69,44 @@ export function CommandCenterView({
             {formatUsd(dashboard.portfolio.paper_capital_allocated_usd)}
           </div>
           <div className="mt-2 text-xs text-slate-400">
-            Tier 1 cap · Live execution disabled
+            Tier 1 paper pool · Live execution disabled
           </div>
         </div>
 
         <div className="border border-slate-800 bg-[#111827] rounded-xl p-5 flex flex-col justify-between">
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-medium text-slate-400">Daily Simulated P&amp;L</span>
-            <ProvenanceLabel provenance="UNAVAILABLE" />
+            <ProvenanceLabel provenance="SIMULATED" />
           </div>
-          <div className="mt-3 text-2xl font-semibold font-mono tabular-nums text-slate-200">
-            {formatUsd(dashboard.portfolio.daily_simulated_pnl_usd)}
+          <div
+            className={`mt-3 text-2xl font-semibold font-mono tabular-nums ${
+              dailyPnl < 0 ? 'text-rose-400' : dailyPnl > 0 ? 'text-emerald-400' : 'text-slate-100'
+            }`}
+          >
+            {formatUsd(dailyPnl)}
           </div>
-          <div className="mt-2 text-xs text-slate-400">
-            Paper simulator scheduled for Phase 2
+          <div className="mt-2 text-xs text-slate-400 flex items-center justify-between gap-2">
+            <span>Simulated unwind P&amp;L · Cap -$250/day</span>
+            <button
+              type="button"
+              onClick={() => onNavigateTab('cross_venue')}
+              className="text-sky-400 hover:text-sky-300 underline-offset-2 hover:underline shrink-0"
+            >
+              Blotter
+            </button>
           </div>
         </div>
 
         <div className="border border-slate-800 bg-[#111827] rounded-xl p-5 flex flex-col justify-between">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-medium text-slate-400">Active Polymarket Exposure</span>
-            <ProvenanceLabel provenance="LIVE" />
+            <span className="text-xs font-medium text-slate-400">Active Simulated Exposure</span>
+            <ProvenanceLabel provenance="SIMULATED" />
           </div>
           <div className="mt-3 text-2xl font-semibold font-mono tabular-nums text-slate-50">
             {formatUsd(dashboard.portfolio.deployed_exposure_usd)}
           </div>
           <div className="mt-2 text-xs text-slate-400 font-mono tabular-nums">
-            Cap {formatUsd(dashboard.risk_gate.policy.max_venue_exposure_usd.polymarket)} · Read-Only
+            Polymarket + Kalshi · $2.5k cap/venue
           </div>
         </div>
 
@@ -322,7 +335,7 @@ export function CommandCenterView({
             ))}
           </div>
 
-          <div className="pt-3 border-t border-slate-800 grid grid-cols-2 gap-3 text-xs">
+          <div className="pt-3 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
             <div className="p-3 rounded-lg bg-[#0E1522] border border-slate-800/80">
               <div className="text-slate-400">Polymarket Gamma</div>
               <div
@@ -347,6 +360,20 @@ export function CommandCenterView({
                 {polyHealth?.clob_reachable === true
                   ? `REACHABLE (${polyHealth.probe_latency_ms ?? 0}ms)`
                   : polyHealth?.clob_reachable === false
+                    ? 'UNREACHABLE'
+                    : 'UNPROBED'}
+              </div>
+            </div>
+            <div className="p-3 rounded-lg bg-[#0E1522] border border-slate-800/80">
+              <div className="text-slate-400">Kalshi Trade API v2</div>
+              <div
+                className={`mt-1 font-mono font-semibold ${
+                  kalshiHealth?.reachable ? 'text-emerald-400' : 'text-amber-400'
+                }`}
+              >
+                {kalshiHealth?.reachable === true
+                  ? `REACHABLE (${kalshiHealth.probe_latency_ms ?? 0}ms)`
+                  : kalshiHealth?.reachable === false
                     ? 'UNREACHABLE'
                     : 'UNPROBED'}
               </div>

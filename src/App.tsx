@@ -1,15 +1,20 @@
 import { useCallback, useEffect, useState } from 'react';
 import { certaintyApi } from './api/client';
 import { CommandCenterView } from './components/CommandCenterView';
+import { CrossVenuePaperView } from './components/CrossVenuePaperView';
 import { MemoryArchitectureView } from './components/MemoryArchitectureView';
 import { RiskGateAuditView } from './components/RiskGateAuditView';
 import { ScannerView } from './components/ScannerView';
 import { SidebarNav, type WorkspaceTab } from './components/SidebarNav';
 import { TopBar } from './components/TopBar';
 import type {
+  CrossVenueOpportunityRecord,
+  CrossVenuePairRecord,
   DashboardPayload,
   HealthPayload,
+  KalshiMarketSummary,
   MarketBookSnapshotResponse,
+  PaperBlotterResponse,
 } from './types/certainty';
 import type { RiskDryRunFormState } from './utils/formatters';
 
@@ -27,6 +32,12 @@ export default function App() {
   const [bookLoading, setBookLoading] = useState(false);
   const [bookError, setBookError] = useState<string | null>(null);
 
+  const [kalshiMarkets, setKalshiMarkets] = useState<KalshiMarketSummary[]>([]);
+  const [kalshiLoading, setKalshiLoading] = useState(false);
+  const [crossPairs, setCrossPairs] = useState<CrossVenuePairRecord[]>([]);
+  const [crossOpps, setCrossOpps] = useState<CrossVenueOpportunityRecord[]>([]);
+  const [paperBlotter, setPaperBlotter] = useState<PaperBlotterResponse | null>(null);
+
   const loadSelectedBook = useCallback(async (marketId: string) => {
     setSelectedMarketId(marketId);
     setBookLoading(true);
@@ -42,6 +53,33 @@ export default function App() {
     }
   }, []);
 
+  const loadCrossVenueAndBlotter = useCallback(async () => {
+    try {
+      const [pairsRes, oppsRes, blotterRes] = await Promise.all([
+        certaintyApi.getCrossVenuePairs(100),
+        certaintyApi.getCrossVenueOpportunities(100),
+        certaintyApi.getPaperBlotter(100),
+      ]);
+      setCrossPairs(pairsRes.items);
+      setCrossOpps(oppsRes.items);
+      setPaperBlotter(blotterRes);
+    } catch {
+      // Errors surfaced by main loader or interactive actions
+    }
+  }, []);
+
+  const loadKalshiMarkets = useCallback(async () => {
+    setKalshiLoading(true);
+    try {
+      const res = await certaintyApi.getKalshiMarkets(15);
+      setKalshiMarkets(res.markets);
+    } catch {
+      // Surface smoothly without blocking core dashboard
+    } finally {
+      setKalshiLoading(false);
+    }
+  }, []);
+
   const loadAll = useCallback(
     async (probeVenues = true) => {
       try {
@@ -51,6 +89,7 @@ export default function App() {
         const [dashData, healthData] = await Promise.all([
           dashPromise,
           shouldFetchHealth ? certaintyApi.getHealth(true) : Promise.resolve(null),
+          loadCrossVenueAndBlotter(),
         ]);
         setDashboard(dashData);
         if (healthData) {
@@ -71,11 +110,12 @@ export default function App() {
         setLoading(false);
       }
     },
-    [health, loadSelectedBook, selectedMarketId]
+    [health, loadCrossVenueAndBlotter, loadSelectedBook, selectedMarketId]
   );
 
   useEffect(() => {
     void loadAll(true);
+    void loadKalshiMarkets();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -218,6 +258,25 @@ export default function App() {
                   scanning={scanning}
                   onSelectMarket={(id) => void loadSelectedBook(id)}
                   onRunCustomScan={(params) => void handleRunScan(params)}
+                />
+              ) : null}
+
+              {activeTab === 'cross_venue' ? (
+                <CrossVenuePaperView
+                  polymarketOpportunities={
+                    dashboard.latest_opportunities.length > 0
+                      ? dashboard.latest_opportunities
+                      : dashboard.recent_all_opportunities
+                  }
+                  kalshiMarkets={kalshiMarkets}
+                  kalshiLoading={kalshiLoading}
+                  pairs={crossPairs}
+                  crossOpportunities={crossOpps}
+                  blotter={paperBlotter}
+                  onRefreshKalshi={loadKalshiMarkets}
+                  onRefreshCrossVenue={async () => {
+                    await Promise.all([loadCrossVenueAndBlotter(), loadAll(false)]);
+                  }}
                 />
               ) : null}
 
