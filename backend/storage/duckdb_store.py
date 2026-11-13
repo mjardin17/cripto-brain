@@ -31,6 +31,7 @@ class DuckDBStore:
         self._conn = duckdb.connect(self.db_path)
         self._init_schema()
         self._seed_initial_memory_if_empty()
+        self._backfill_structured_memory_from_legacy()
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -279,6 +280,97 @@ class DuckDBStore:
                 )
                 """
             )
+            # Phase 3 Stage 3B additive tables (preserve all Phase 1 & Phase 2 tables untouched)
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_entries (
+                    memory_id VARCHAR PRIMARY KEY,
+                    memory_key VARCHAR NOT NULL,
+                    memory_tier VARCHAR NOT NULL,
+                    category VARCHAR NOT NULL,
+                    title VARCHAR NOT NULL,
+                    summary VARCHAR NOT NULL,
+                    content_json VARCHAR NOT NULL,
+                    evidence_json VARCHAR NOT NULL,
+                    tags_json VARCHAR NOT NULL,
+                    confidence DOUBLE NOT NULL,
+                    source_agent VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    version INTEGER NOT NULL,
+                    occurrence_count INTEGER NOT NULL,
+                    contradicts_id VARCHAR,
+                    supersedes_id VARCHAR,
+                    retention_policy VARCHAR NOT NULL,
+                    expires_at VARCHAR,
+                    last_applied_at VARCHAR,
+                    created_at VARCHAR NOT NULL,
+                    updated_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_versions (
+                    version_id VARCHAR PRIMARY KEY,
+                    memory_id VARCHAR NOT NULL,
+                    version INTEGER NOT NULL,
+                    title VARCHAR NOT NULL,
+                    summary VARCHAR NOT NULL,
+                    content_json VARCHAR NOT NULL,
+                    evidence_json VARCHAR NOT NULL,
+                    confidence DOUBLE NOT NULL,
+                    status VARCHAR NOT NULL,
+                    change_reason VARCHAR NOT NULL,
+                    changed_by VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learning_cycles (
+                    cycle_id VARCHAR PRIMARY KEY,
+                    stage VARCHAR NOT NULL,
+                    source_type VARCHAR NOT NULL,
+                    source_ref_id VARCHAR NOT NULL,
+                    agent_id VARCHAR NOT NULL,
+                    subject_key VARCHAR NOT NULL,
+                    hypothesis VARCHAR NOT NULL,
+                    expected_outcome_json VARCHAR NOT NULL,
+                    decision_summary VARCHAR NOT NULL,
+                    actual_outcome_json VARCHAR NOT NULL,
+                    outcome_matched BOOLEAN,
+                    review_notes VARCHAR NOT NULL,
+                    evidence_json VARCHAR NOT NULL,
+                    candidate_memory_id VARCHAR,
+                    promoted_memory_id VARCHAR,
+                    regression_case_id VARCHAR,
+                    applied_flag BOOLEAN NOT NULL,
+                    created_at VARCHAR NOT NULL,
+                    updated_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS generated_regression_cases (
+                    case_id VARCHAR PRIMARY KEY,
+                    source_memory_id VARCHAR,
+                    source_cycle_id VARCHAR,
+                    source_ref_id VARCHAR NOT NULL,
+                    category VARCHAR NOT NULL,
+                    title VARCHAR NOT NULL,
+                    description VARCHAR NOT NULL,
+                    input_fixture_json VARCHAR NOT NULL,
+                    expected_invariant_json VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    last_run_status VARCHAR,
+                    last_run_detail VARCHAR,
+                    last_run_at VARCHAR,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
 
     def _seed_initial_memory_if_empty(self) -> None:
         with self._lock:
@@ -318,6 +410,124 @@ class DuckDBStore:
                 "INSERT INTO agent_memory VALUES (?, ?, ?, ?, ?, ?, ?)",
                 initial_lessons,
             )
+
+    def _backfill_structured_memory_from_legacy(self) -> None:
+        """Idempotently backfill existing agent_memory rows into memory_entries without inventing evidence."""
+        tier_map = {
+            "FEE_MODEL": ("SEMANTIC", "PERMANENT", 0.95),
+            "MARKET_DATA_INVARIANT": ("SEMANTIC", "PERMANENT", 0.95),
+            "MARKET_DATA_ERROR": ("PROCEDURAL", "PERMANENT", 0.90),
+            "BLOCKER_ESCALATION": ("EPISODIC", "STANDARD_90D", 0.70),
+            "RISK_GOVERNANCE": ("EPISODIC", "PERMANENT", 0.95),
+            "CALIBRATION_NOTE": ("AGENT_PERF", "STANDARD_90D", 0.75),
+        }
+        with self._lock:
+            legacy_rows = self._conn.execute(
+                "SELECT memory_id, category, title, summary, evidence_json, status, created_at FROM agent_memory"
+            ).fetchall()
+            for memory_id, category, title, summary, evidence_json, status, created_at in legacy_rows:
+                exists = self._conn.execute(
+                    "SELECT 1 FROM memory_entries WHERE memory_id = ?",
+                    [memory_id],
+                ).fetchone()
+                if exists:
+                    continue
+
+                try:
+                    raw_ev = json.loads(evidence_json or "{}")
+                except (TypeError, ValueError):
+                    raw_ev = {}
+
+                # Preserve exact legacy evidence without fabricating anything
+                evidence_list: list[dict[str, Any]] = []
+                if isinstance(raw_ev, list):
+                    evidence_list = [e for e in raw_ev if isinstance(e, dict)]
+                elif isinstance(raw_ev, dict) and raw_ev:
+                    evidence_list = [
+                        {
+                            "source_type": "LEGACY_AGENT_MEMORY",
+                            "source_ref_id": memory_id,
+                            "detail": f"Preserved Phase 0/1 evidence for {category}",
+                            "payload": raw_ev,
+                        }
+                    ]
+
+                memory_tier, retention_policy, default_conf = tier_map.get(
+                    category, ("EPISODIC", "STANDARD_90D", 0.65)
+                )
+                norm_status = status
+                # Do not treat an empty-evidence legacy record as a verified lesson
+                if status == "VERIFIED_LESSON" and not evidence_list:
+                    norm_status = "CANDIDATE"
+
+                slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in str(title)).strip("-")
+                while "--" in slug:
+                    slug = slug.replace("--", "-")
+                memory_key = f"{memory_tier.lower()}:{str(category).lower()}:{slug[:64]}"
+                content_obj = {
+                    "legacy_memory_id": memory_id,
+                    "subject_key": memory_key,
+                    "raw_evidence_present": bool(evidence_list),
+                }
+                tags_obj = [str(category).lower(), "backfilled"]
+                if str(memory_id).startswith("MEM-PHASE0"):
+                    tags_obj.append("phase0")
+
+                content_str = json.dumps(content_obj)
+                ev_str = json.dumps(evidence_list)
+                tags_str = json.dumps(tags_obj)
+
+                self._conn.execute(
+                    """
+                    INSERT INTO memory_entries VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    [
+                        memory_id,
+                        memory_key,
+                        memory_tier,
+                        category,
+                        title,
+                        summary,
+                        content_str,
+                        ev_str,
+                        tags_str,
+                        default_conf if evidence_list else 0.4,
+                        "legacy_backfill",
+                        norm_status,
+                        1,
+                        1,
+                        None,
+                        None,
+                        retention_policy,
+                        None,
+                        None,
+                        created_at,
+                        created_at,
+                    ],
+                )
+                self._conn.execute(
+                    """
+                    INSERT INTO memory_versions VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    [
+                        f"MVER-{uuid.uuid4().hex[:10].upper()}",
+                        memory_id,
+                        1,
+                        title,
+                        summary,
+                        content_str,
+                        ev_str,
+                        default_conf if evidence_list else 0.4,
+                        norm_status,
+                        "Initial backfill from legacy agent_memory preserving original evidence",
+                        "legacy_backfill",
+                        created_at,
+                    ],
+                )
 
     def get_state(self, key: str, default: Any = None) -> Any:
         with self._lock:
@@ -922,6 +1132,9 @@ class DuckDBStore:
             xopps = self._conn.execute("SELECT COUNT(*) FROM cross_venue_opportunities").fetchone()[0]
             porders = self._conn.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0]
             pfills = self._conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0]
+            smem = self._conn.execute("SELECT COUNT(*) FROM memory_entries").fetchone()[0]
+            lcycles = self._conn.execute("SELECT COUNT(*) FROM learning_cycles").fetchone()[0]
+            regcases = self._conn.execute("SELECT COUNT(*) FROM generated_regression_cases").fetchone()[0]
             return {
                 "snapshots": int(snaps),
                 "opportunities": int(opps),
@@ -931,6 +1144,9 @@ class DuckDBStore:
                 "cross_venue_opportunities": int(xopps),
                 "paper_orders": int(porders),
                 "paper_fills": int(pfills),
+                "structured_memories": int(smem),
+                "learning_cycles": int(lcycles),
+                "regression_cases": int(regcases),
             }
 
     def close(self) -> None:

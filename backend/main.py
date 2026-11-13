@@ -14,6 +14,8 @@ from backend.arbitrage.matcher import assess_contract_equivalence, title_similar
 from backend.arbitrage.scanner import PolymarketArbitrageScanner
 from backend.execution.paper_simulator import PaperExecutionEngine, PaperExecutionRequest
 from backend.future.modules import get_module_registry
+from backend.intelligence.learning_engine import LearningEngine
+from backend.intelligence.memory_manager import MemoryTier, StructuredMemoryManager
 from backend.risk_gate.engine import (
     DeterministicRiskGate,
     RiskEvaluationRequest,
@@ -62,6 +64,25 @@ class CrossVenueScanRequest(BaseModel):
     slippage_buffer_bps: float = Field(default=15.0, ge=0.0, le=200.0)
 
 
+class StructuredMemoryCreateRequest(BaseModel):
+    memory_tier: MemoryTier = "EPISODIC"
+    category: str = Field(min_length=2, max_length=64)
+    title: str = Field(min_length=3, max_length=160)
+    summary: str = Field(min_length=5, max_length=1000)
+    source_agent: str = Field(default="operator", min_length=2, max_length=64)
+    content: dict[str, Any] = Field(default_factory=dict)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.70, ge=0.0, le=1.0)
+    explicit_key: str | None = Field(default=None, max_length=120)
+
+
+class MemoryRollbackRequest(BaseModel):
+    target_version: int = Field(ge=1)
+    changed_by: str = Field(default="operator", min_length=2, max_length=64)
+    reason: str = Field(default="Operator version recovery", min_length=3, max_length=240)
+
+
 def create_app(db_path: str | None = None) -> FastAPI:
     store = DuckDBStore(db_path=db_path)
     policy = RiskPolicy()
@@ -75,6 +96,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
     paper_engine = PaperExecutionEngine(
         store=store, risk_gate=risk_gate, poly_client=poly_client, kalshi_client=kalshi_client
     )
+    memory_manager = StructuredMemoryManager(store=store)
+    learning_engine = LearningEngine(store=store, memory_manager=memory_manager)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -83,8 +106,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     app = FastAPI(
         title="The Certainty Stack API",
-        version="0.2.0-phase2",
-        description="Independent fail-closed Risk Gate, Polymarket + Kalshi read-only ingestion, cross-venue paper simulator, and DuckDB analytics.",
+        version="0.3.0-stage3b",
+        description="Independent fail-closed Risk Gate, Polymarket + Kalshi read-only ingestion, cross-venue paper simulator, structured memory & learning core, and DuckDB analytics.",
         lifespan=lifespan,
     )
 
@@ -93,6 +116,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.state.scanner = scanner
     app.state.cross_scanner = cross_scanner
     app.state.paper_engine = paper_engine
+    app.state.memory_manager = memory_manager
+    app.state.learning_engine = learning_engine
     app.state.poly_client = poly_client
     app.state.kalshi_client = kalshi_client
 
@@ -264,6 +289,84 @@ def create_app(db_path: str | None = None) -> FastAPI:
             summary=req.summary,
             status=req.status,
         )
+
+    @app.get("/api/memory/structured")
+    async def list_structured_memory(
+        q: str = Query(default="", max_length=200),
+        tier: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        category: str | None = Query(default=None),
+        include_archived: bool = Query(default=False),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        if q.strip():
+            items = memory_manager.search_relevant(
+                q.strip(),
+                memory_tier=tier.upper() if tier else None,  # type: ignore[arg-type]
+                category=category,
+                statuses=[status.upper()] if status else None,  # type: ignore[list-item]
+                include_archived=include_archived,
+                limit=limit,
+            )
+        else:
+            items = memory_manager.list_entries(
+                memory_tier=tier,
+                status=status,
+                category=category,
+                include_archived=include_archived,
+                limit=limit,
+            )
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/memory/structured")
+    async def create_structured_memory(req: StructuredMemoryCreateRequest) -> dict[str, Any]:
+        return memory_manager.record_candidate(
+            memory_tier=req.memory_tier,
+            category=req.category,
+            title=req.title,
+            summary=req.summary,
+            source_agent=req.source_agent,
+            content=req.content,
+            evidence=req.evidence,
+            tags=req.tags,
+            confidence=req.confidence,
+            explicit_key=req.explicit_key,
+        )
+
+    @app.get("/api/memory/structured/{memory_id}/versions")
+    async def get_structured_memory_versions(memory_id: str) -> dict[str, Any]:
+        entry = memory_manager.get_entry(memory_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Unknown memory_id '{memory_id}'")
+        versions = memory_manager.get_versions(memory_id)
+        return {"memory_id": memory_id, "count": len(versions), "versions": versions}
+
+    @app.post("/api/memory/structured/{memory_id}/rollback")
+    async def rollback_structured_memory(memory_id: str, req: MemoryRollbackRequest) -> dict[str, Any]:
+        try:
+            restored = memory_manager.recover_version(
+                memory_id,
+                target_version=req.target_version,
+                changed_by=req.changed_by,
+                reason=req.reason,
+            )
+            return {"restored": restored}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/learning/cycles")
+    async def list_learning_cycles(
+        stage: str | None = Query(default=None),
+        source_type: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        items = learning_engine.list_cycles(stage=stage, source_type=source_type, limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.get("/api/learning/regression-cases")
+    async def list_learning_regression_cases(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+        items = learning_engine.list_regression_cases(limit=limit)
+        return {"count": len(items), "items": items}
 
     @app.get("/api/kalshi/markets")
     async def kalshi_markets(limit: int = Query(default=15, ge=1, le=40)) -> dict[str, Any]:
