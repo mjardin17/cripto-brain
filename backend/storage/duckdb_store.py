@@ -371,6 +371,89 @@ class DuckDBStore:
                 )
                 """
             )
+            # Phase 3 Stage 3C additive orchestration & recovery tables
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_tasks (
+                    task_id VARCHAR PRIMARY KEY,
+                    dedup_key VARCHAR NOT NULL,
+                    task_type VARCHAR NOT NULL,
+                    assigned_agent VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    priority INTEGER NOT NULL,
+                    payload_json VARCHAR NOT NULL,
+                    result_json VARCHAR NOT NULL,
+                    depends_on_json VARCHAR NOT NULL,
+                    worker_id VARCHAR,
+                    lease_token VARCHAR,
+                    lease_expires_at VARCHAR,
+                    last_heartbeat_at VARCHAR,
+                    timeout_seconds DOUBLE NOT NULL,
+                    started_at VARCHAR,
+                    attempt_count INTEGER NOT NULL,
+                    max_retries INTEGER NOT NULL,
+                    recovery_attempts INTEGER NOT NULL,
+                    max_recovery_attempts INTEGER NOT NULL,
+                    last_blocker_id VARCHAR,
+                    escalation_reason VARCHAR,
+                    created_by VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL,
+                    updated_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS worker_registry (
+                    worker_id VARCHAR PRIMARY KEY,
+                    agent_role VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    current_task_id VARCHAR,
+                    permitted_actions_json VARCHAR NOT NULL,
+                    last_heartbeat_at VARCHAR NOT NULL,
+                    tasks_completed INTEGER NOT NULL,
+                    tasks_failed INTEGER NOT NULL,
+                    spawned_at VARCHAR NOT NULL,
+                    updated_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blocker_events (
+                    blocker_id VARCHAR PRIMARY KEY,
+                    task_id VARCHAR NOT NULL,
+                    agent_id VARCHAR NOT NULL,
+                    worker_id VARCHAR,
+                    blocker_class VARCHAR NOT NULL,
+                    error_message VARCHAR NOT NULL,
+                    memory_hits_json VARCHAR NOT NULL,
+                    candidate_strategies_json VARCHAR NOT NULL,
+                    selected_strategy VARCHAR,
+                    recovery_action VARCHAR,
+                    verification_detail VARCHAR,
+                    outcome VARCHAR NOT NULL,
+                    learning_cycle_id VARCHAR,
+                    regression_case_id VARCHAR,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_activity_log (
+                    activity_id VARCHAR PRIMARY KEY,
+                    actor VARCHAR NOT NULL,
+                    agent_role VARCHAR NOT NULL,
+                    task_id VARCHAR,
+                    worker_id VARCHAR,
+                    event_type VARCHAR NOT NULL,
+                    summary VARCHAR NOT NULL,
+                    detail_json VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
 
     def _seed_initial_memory_if_empty(self) -> None:
         with self._lock:
@@ -1135,6 +1218,11 @@ class DuckDBStore:
             smem = self._conn.execute("SELECT COUNT(*) FROM memory_entries").fetchone()[0]
             lcycles = self._conn.execute("SELECT COUNT(*) FROM learning_cycles").fetchone()[0]
             regcases = self._conn.execute("SELECT COUNT(*) FROM generated_regression_cases").fetchone()[0]
+            atasks = self._conn.execute("SELECT COUNT(*) FROM agent_tasks").fetchone()[0]
+            workers = self._conn.execute(
+                "SELECT COUNT(*) FROM worker_registry WHERE status != 'STOPPED'"
+            ).fetchone()[0]
+            blockers = self._conn.execute("SELECT COUNT(*) FROM blocker_events").fetchone()[0]
             return {
                 "snapshots": int(snaps),
                 "opportunities": int(opps),
@@ -1147,6 +1235,9 @@ class DuckDBStore:
                 "structured_memories": int(smem),
                 "learning_cycles": int(lcycles),
                 "regression_cases": int(regcases),
+                "agent_tasks": int(atasks),
+                "active_workers": int(workers),
+                "blocker_events": int(blockers),
             }
 
     def close(self) -> None:

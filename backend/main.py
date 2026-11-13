@@ -16,6 +16,7 @@ from backend.execution.paper_simulator import PaperExecutionEngine, PaperExecuti
 from backend.future.modules import get_module_registry
 from backend.intelligence.learning_engine import LearningEngine
 from backend.intelligence.memory_manager import MemoryTier, StructuredMemoryManager
+from backend.intelligence.supervisor import SupervisorOrchestrator
 from backend.risk_gate.engine import (
     DeterministicRiskGate,
     RiskEvaluationRequest,
@@ -83,6 +84,34 @@ class MemoryRollbackRequest(BaseModel):
     reason: str = Field(default="Operator version recovery", min_length=3, max_length=240)
 
 
+class AgentTaskCreateRequest(BaseModel):
+    task_type: str = Field(min_length=2, max_length=64)
+    assigned_agent: str = Field(min_length=2, max_length=64)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    priority: int = Field(default=5, ge=1, le=10)
+    depends_on: list[str] = Field(default_factory=list)
+    dedup_key: str | None = Field(default=None, max_length=140)
+    timeout_seconds: float = Field(default=30.0, gt=0.05, le=300.0)
+    max_retries: int | None = Field(default=None, ge=0, le=5)
+    max_recovery_attempts: int | None = Field(default=None, ge=0, le=5)
+    created_by: str = Field(default="operator", min_length=2, max_length=64)
+
+
+class TaskHeartbeatRequest(BaseModel):
+    worker_id: str = Field(min_length=2, max_length=64)
+    lease_token: str = Field(min_length=2, max_length=64)
+    extend_lease_seconds: float | None = Field(default=None, ge=1.0, le=120.0)
+
+
+class AgentDispatchRequest(BaseModel):
+    max_tasks: int = Field(default=4, ge=1, le=8)
+
+
+class WorkerScaleRequest(BaseModel):
+    target_concurrency: int | None = Field(default=None, ge=0, le=8)
+    max_concurrency: int | None = Field(default=None, ge=1, le=8)
+
+
 def create_app(db_path: str | None = None) -> FastAPI:
     store = DuckDBStore(db_path=db_path)
     policy = RiskPolicy()
@@ -98,6 +127,14 @@ def create_app(db_path: str | None = None) -> FastAPI:
     )
     memory_manager = StructuredMemoryManager(store=store)
     learning_engine = LearningEngine(store=store, memory_manager=memory_manager)
+    supervisor = SupervisorOrchestrator(
+        store=store,
+        risk_gate=risk_gate,
+        memory=memory_manager,
+        learning=learning_engine,
+        scanner=scanner,
+        cross_scanner=cross_scanner,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -106,8 +143,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     app = FastAPI(
         title="The Certainty Stack API",
-        version="0.3.0-stage3b",
-        description="Independent fail-closed Risk Gate, Polymarket + Kalshi read-only ingestion, cross-venue paper simulator, structured memory & learning core, and DuckDB analytics.",
+        version="0.3.0-stage3c",
+        description="Independent fail-closed Risk Gate, Polymarket + Kalshi read-only ingestion, cross-venue paper simulator, structured memory & learning core, multi-agent Supervisor, and DuckDB analytics.",
         lifespan=lifespan,
     )
 
@@ -118,6 +155,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.state.paper_engine = paper_engine
     app.state.memory_manager = memory_manager
     app.state.learning_engine = learning_engine
+    app.state.supervisor = supervisor
     app.state.poly_client = poly_client
     app.state.kalshi_client = kalshi_client
 
@@ -366,6 +404,70 @@ def create_app(db_path: str | None = None) -> FastAPI:
     @app.get("/api/learning/regression-cases")
     async def list_learning_regression_cases(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
         items = learning_engine.list_regression_cases(limit=limit)
+        return {"count": len(items), "items": items}
+
+    # ------------------------------------------------------------------
+    # Stage 3C: Supervisor, Specialized Agents, Worker Pool & Blocker Recovery
+    # ------------------------------------------------------------------
+    @app.get("/api/agents/status")
+    async def agents_status() -> dict[str, Any]:
+        return supervisor.get_status_snapshot()
+
+    @app.get("/api/agents/tasks")
+    async def list_agent_tasks(
+        status: str | None = Query(default=None),
+        assigned_agent: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=300),
+    ) -> dict[str, Any]:
+        items = supervisor.list_tasks(status=status, assigned_agent=assigned_agent, limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/agents/tasks")
+    async def create_agent_task(req: AgentTaskCreateRequest) -> dict[str, Any]:
+        try:
+            return supervisor.submit_task(
+                task_type=req.task_type,
+                assigned_agent=req.assigned_agent,
+                payload=req.payload,
+                priority=req.priority,
+                depends_on=req.depends_on,
+                dedup_key=req.dedup_key,
+                timeout_seconds=req.timeout_seconds,
+                max_retries=req.max_retries,
+                max_recovery_attempts=req.max_recovery_attempts,
+                created_by=req.created_by,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/agents/tasks/{task_id}/heartbeat")
+    async def heartbeat_agent_task(task_id: str, req: TaskHeartbeatRequest) -> dict[str, Any]:
+        try:
+            updated = supervisor.heartbeat(
+                task_id,
+                worker_id=req.worker_id,
+                lease_token=req.lease_token,
+                extend_lease_seconds=req.extend_lease_seconds,
+            )
+            return {"task": updated}
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/agents/dispatch")
+    async def dispatch_agent_tasks(req: AgentDispatchRequest) -> dict[str, Any]:
+        return await supervisor.dispatch_cycle(max_tasks=req.max_tasks)
+
+    @app.post("/api/agents/scale")
+    async def scale_agent_workers(req: WorkerScaleRequest) -> dict[str, Any]:
+        if req.max_concurrency is not None:
+            supervisor.set_max_concurrency(req.max_concurrency)
+        return supervisor.scale_workers(target_concurrency=req.target_concurrency)
+
+    @app.get("/api/agents/blockers")
+    async def list_agent_blockers(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+        items = supervisor.blocker_engine.list_blockers(limit=limit)
         return {"count": len(items), "items": items}
 
     @app.get("/api/kalshi/markets")
