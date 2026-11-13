@@ -1,1 +1,1 @@
-"""Inactive future strategy blueprints (Phase 5 — Tier 2 & Tier 3)."""
+"""Inactive future strategy blueprints (Future Phases — Tier 2 & Tier 3)."""

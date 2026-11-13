@@ -12,7 +12,7 @@ class RiskPolicy(BaseModel, frozen=True):
         default=1.50, description="Minimum 1.50% net edge for intra-venue arbitrage"
     )
     min_cross_venue_edge_pct: float = Field(
-        default=2.00, description="Minimum 2.00% net edge for cross-venue arbitrage (Phase 3+)"
+        default=2.00, description="Minimum 2.00% net edge for cross-venue arbitrage (Phase 2+)"
     )
     max_liquidity_participation_pct: float = Field(
         default=10.0, description="Maximum 10.0% participation in available thinner-leg depth"

@@ -30,8 +30,8 @@ const PHASE0_FINDINGS = [
   {
     item: 'Kalshi Trade API v2 (api.elections.kalshi.com)',
     finding:
-      'Verified reachable for Phase 3 planning. Cross-venue execution and matching remain disabled until Phase 1 & Phase 2 pass acceptance.',
-    status: 'PHASE 3',
+      'Verified reachable for Phase 2 planning. Cross-venue paper execution and matching remain disabled until Phase 1 passes acceptance and Phase 2 is approved.',
+    status: 'PHASE 2',
   },
   {
     item: 'Execution & Signing Isolation',
@@ -103,10 +103,10 @@ export function MemoryArchitectureView({
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-sm font-semibold text-slate-100">
-              Future Tier 2, Tier 3 &amp; Phase 2–3 Module Boundaries
+              Phase 2, Tier 2 &amp; Tier 3 Module Boundaries
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              All future execution, crypto perpetuals, and AI research modules remain strictly inactive until Phase 1 approval.
+              All Kalshi, paper execution, crypto perpetuals, and AI research modules remain strictly inactive until Phase 1 approval.
             </p>
           </div>
           <ProvenanceLabel provenance="UNAVAILABLE" />

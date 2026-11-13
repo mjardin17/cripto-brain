@@ -125,7 +125,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
                     },
                     {
                         "venue": "Kalshi V2",
-                        "mode": "INACTIVE_PHASE_3",
+                        "mode": "INACTIVE_PHASE_2",
                         "provenance": "UNAVAILABLE",
                         "current_exposure_usd": 0.0,
                         "max_cap_usd": policy.max_venue_exposure_usd["kalshi"],

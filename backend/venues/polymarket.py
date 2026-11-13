@@ -192,9 +192,9 @@ class PolymarketReadOnlyClient:
         fetched_at_ms = int(time.time() * 1000)
         raw_ts = payload.get("timestamp")
         try:
-            book_ts_ms = int(raw_ts) if raw_ts is not None else fetched_at_ms
+            book_ts_ms = int(raw_ts) if raw_ts is not None else 0
         except (TypeError, ValueError):
-            book_ts_ms = fetched_at_ms
+            book_ts_ms = 0
 
         raw_bids = payload.get("bids") or []
         raw_asks = payload.get("asks") or []

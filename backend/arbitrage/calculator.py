@@ -83,6 +83,51 @@ class BinaryArbitrageEvaluation:
     data_age_ms: int
 
 
+@dataclass(frozen=True)
+class DataFreshness:
+    valid: bool
+    data_age_ms: int
+    clob_age_ms: int
+    fetch_age_ms: int
+
+
+def compute_data_freshness(
+    now_ms: int,
+    yes_book_ts_ms: int,
+    no_book_ts_ms: int,
+    yes_fetched_at_ms: int,
+    no_fetched_at_ms: int,
+    max_future_skew_ms: int = 5_000,
+) -> DataFreshness:
+    """Compute one deterministic, fail-closed data age across both binary legs.
+
+    - Missing/non-positive timestamps fail closed (data_age_ms = -1).
+    - Future-skewed timestamps beyond tolerance fail closed (data_age_ms = -1).
+    - Canonical data_age_ms is max(clob_age_ms, fetch_age_ms) so neither stale
+      exchange books nor stale local polls can bypass Risk Gate rejection.
+    """
+    timestamps = (yes_book_ts_ms, no_book_ts_ms, yes_fetched_at_ms, no_fetched_at_ms)
+    if now_ms <= 0 or any(ts <= 0 for ts in timestamps):
+        return DataFreshness(valid=False, data_age_ms=-1, clob_age_ms=-1, fetch_age_ms=-1)
+
+    oldest_book_ts = min(yes_book_ts_ms, no_book_ts_ms)
+    newest_book_ts = max(yes_book_ts_ms, no_book_ts_ms)
+    oldest_fetch_ts = min(yes_fetched_at_ms, no_fetched_at_ms)
+
+    if (newest_book_ts - now_ms) > max_future_skew_ms:
+        return DataFreshness(valid=False, data_age_ms=-1, clob_age_ms=-1, fetch_age_ms=-1)
+
+    clob_age_ms = max(0, now_ms - oldest_book_ts)
+    fetch_age_ms = max(0, now_ms - oldest_fetch_ts)
+    canonical_age_ms = max(clob_age_ms, fetch_age_ms)
+    return DataFreshness(
+        valid=True,
+        data_age_ms=canonical_age_ms,
+        clob_age_ms=clob_age_ms,
+        fetch_age_ms=fetch_age_ms,
+    )
+
+
 def _parse_levels(raw_levels: list[dict[str, Any]], descending: bool) -> tuple[OrderBookLevel, ...]:
     merged: dict[float, float] = {}
     for lvl in raw_levels or []:

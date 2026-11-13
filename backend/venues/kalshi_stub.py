@@ -1,6 +1,6 @@
-"""Phase 3 Inactive Stub — Kalshi V2 Read-Only Venue Adapter.
+"""Phase 2 Inactive Stub — Kalshi V2 Read-Only Venue Adapter.
 
-Scheduled for Phase 3 after Phase 1 owner approval and Phase 2 paper execution validation.
+Scheduled for Phase 2 (Kalshi read-only integration + cross-venue paper execution) after Phase 1 approval.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from typing import Any
 
 class KalshiVenueStub:
     venue_id = "kalshi"
-    phase = "Phase 3"
+    phase = "Phase 2"
     status = "INACTIVE"
     api_base_url = "https://api.elections.kalshi.com/trade-api/v2"
     live_execution = False
@@ -23,8 +23,8 @@ class KalshiVenueStub:
             "status": self.status,
             "provenance": "UNAVAILABLE",
             "live_execution": self.live_execution,
-            "notes": "Read-only Kalshi V2 integration and cross-venue semantic matching scheduled for Phase 3.",
+            "notes": "Read-only Kalshi V2 integration and cross-venue paper execution scheduled for Phase 2.",
         }
 
     def fetch_markets(self) -> None:
-        raise NotImplementedError("Kalshi integration is inactive until Phase 3.")
+        raise NotImplementedError("Kalshi integration is inactive until Phase 2.")

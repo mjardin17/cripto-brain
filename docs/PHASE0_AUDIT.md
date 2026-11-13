@@ -9,8 +9,8 @@
 
 | Component | Observed State | Limitation / Mitigation |
 |---|---|---|
-| Node.js / Express / Vite | Node v22+, Vite 8.3.0, React 19.0.1, Tailwind CSS 4.3.3, TypeScript 7.0.2, `tsx` 4.21.0 | Runtime preview binds exclusively to port `3000`. Solution: `server.ts` serves Vite/dist on `:3000`, supervises FastAPI on `127.0.0.1:8000`, and reverse-proxies `/api/*`. |
-| Python Runtime | Python 3.10.12 pre-installed; `pip3` and `venv` initially absent | Installed `python3-pip` and `python3-venv` via `apt-get`, creating isolated `.venv` for FastAPI, DuckDB, httpx, Pydantic, and Pytest. |
+| Node.js / Express / Vite | Node v22+, Vite 8.3.0, React 19.0.1, Tailwind CSS 4.3.3, TypeScript 7.0.2, `tsx` 4.21.0 | Runtime preview binds exclusively to port `3000`, while container `control-plane-api` occupies `:8000`. Solution: `server.ts` serves Vite/dist on `:3000`, supervises FastAPI on `127.0.0.1:8010`, and reverse-proxies `/api/*`. |
+| Python Runtime | Python 3.11.2 pre-installed; `pip3` and `venv` initially absent | Installed `python3-pip` and `python3-venv` via `apt-get`, creating isolated `.venv` for FastAPI, DuckDB, httpx, Pydantic, and Pytest. |
 | PostgreSQL (Operational State) | Not provisioned in local Phase 1 container | Phase 1 uses DuckDB for market snapshots, arbitrage opportunities, and audit logs; PostgreSQL operational schema is specified for production deployment (`docs/ARCHITECTURE.md`). |
 | Supplied Repositories | Clean greenfield workspace (`package.json`, `vite.config.ts`, `src/App.tsx`, `src/main.tsx`, `src/index.css`) | No pre-existing trading modules or legacy SDKs present. |
 
@@ -45,7 +45,7 @@
 
 ### C. Kalshi V2 API (`https://api.elections.kalshi.com/trade-api/v2`)
 - **Verified Endpoint:** `GET /markets?limit=1` responded with `HTTP 200` and live contract payloads.
-- **Phase 1 Status:** **Not active.** Scheduled for Phase 3 (read-only Kalshi integration + cross-venue semantic & settlement matching).
+- **Phase 1 Status:** **Not active.** Scheduled for Phase 2 (Kalshi read-only integration + cross-venue semantic/settlement matching + cross-venue paper execution).
 
 ---
 

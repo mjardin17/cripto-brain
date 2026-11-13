@@ -6,11 +6,11 @@ The Risk Gate (`backend/risk_gate/engine.py`) is an independent deterministic ve
 
 ### Active Phase 1 Controls
 1. **Intra-Venue Minimum Net Edge:** `>= 1.50%` (`0.015`) after executable VWAP, taker fees, and slippage buffer.
-2. **Cross-Venue Minimum Net Edge:** `>= 2.00%` (`0.020`) (reserved for Phase 3; cross-venue proposals fail closed until Phase 3 is enabled).
+2. **Cross-Venue Minimum Net Edge:** `>= 2.00%` (`0.020`) (reserved for Phase 2 Kalshi read-only + cross-venue paper execution; cross-venue proposals fail closed until Phase 2 is enabled).
 3. **Liquidity Participation Cap:** `<= 10.0%` (`0.10`) of executable depth on the thinner leg (`min(yes_depth, no_depth)`).
 4. **Maximum Exposure per Venue:** `<= $2,500.00` simulated/paper cap per venue (`polymarket`).
 5. **Separate Daily Loss Limits:** Tier 1 daily loss limit `$250.00`; Tier 2/Tier 3 segregated and disabled (`$0.00`).
-6. **Stale-Data Rejection:** Rejects any order book snapshot older than `15,000 ms` (`15s`) at evaluation time.
+6. **Stale-Data Rejection:** Computes canonical `data_age_ms = max(clob_age_ms, fetch_age_ms)` across both legs (`-1` if missing/invalid/future-skewed beyond `5s`) and rejects any snapshot outside `[0, 15,000 ms]`.
 7. **Partial-Fill & Leg-Risk Guard:** Rejects trades where leg liquidity imbalance ratio exceeds `5:1` or requested shares exceed `min_order_size` bounds or top-depth cap.
 8. **Kill Switch:** Persistent global halt flag stored in DuckDB `system_state`. When active, **all** Risk Gate evaluations return `DENIED (KILL_SWITCH_ACTIVE)`.
 9. **Immutable Audit Trail:** Every evaluation (approved or denied) is atomically recorded to `risk_gate_audit` with the exact rule checks and reason codes.

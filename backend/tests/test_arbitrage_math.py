@@ -7,6 +7,7 @@ import pytest
 from backend.arbitrage.calculator import (
     calculate_polymarket_taker_fee,
     calculate_vwap_for_shares,
+    compute_data_freshness,
     evaluate_binary_arbitrage,
     normalize_clob_book,
 )
@@ -88,3 +89,41 @@ def test_binary_arbitrage_marks_insufficient_depth_non_executable():
     )
     assert res.executable is False
     assert res.net_edge_pct is None
+
+
+def test_compute_data_freshness_uses_worst_case_age_and_fails_closed():
+    now_ms = 1_794_552_500_000
+    # Stale CLOB book timestamp (22s old) despite recent HTTP fetch (50ms old) -> 22,000ms
+    stale_clob = compute_data_freshness(
+        now_ms=now_ms,
+        yes_book_ts_ms=now_ms - 22_000,
+        no_book_ts_ms=now_ms - 1_500,
+        yes_fetched_at_ms=now_ms - 50,
+        no_fetched_at_ms=now_ms - 40,
+    )
+    assert stale_clob.valid is True
+    assert stale_clob.clob_age_ms == 22_000
+    assert stale_clob.fetch_age_ms == 50
+    assert stale_clob.data_age_ms == 22_000
+
+    # Missing/zero timestamp fails closed with data_age_ms = -1
+    missing_ts = compute_data_freshness(
+        now_ms=now_ms,
+        yes_book_ts_ms=0,
+        no_book_ts_ms=now_ms - 500,
+        yes_fetched_at_ms=now_ms - 50,
+        no_fetched_at_ms=now_ms - 40,
+    )
+    assert missing_ts.valid is False
+    assert missing_ts.data_age_ms == -1
+
+    # Excessive future clock skew (>5s) fails closed
+    future_skew = compute_data_freshness(
+        now_ms=now_ms,
+        yes_book_ts_ms=now_ms + 12_000,
+        no_book_ts_ms=now_ms - 200,
+        yes_fetched_at_ms=now_ms - 50,
+        no_fetched_at_ms=now_ms - 40,
+    )
+    assert future_skew.valid is False
+    assert future_skew.data_age_ms == -1

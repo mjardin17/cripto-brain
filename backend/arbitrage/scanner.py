@@ -7,7 +7,7 @@ import time
 import uuid
 from typing import Any
 
-from backend.arbitrage.calculator import evaluate_binary_arbitrage
+from backend.arbitrage.calculator import compute_data_freshness, evaluate_binary_arbitrage
 from backend.risk_gate.engine import DeterministicRiskGate, RiskEvaluationRequest
 from backend.storage.duckdb_store import DuckDBStore, utc_now_iso
 from backend.venues.polymarket import PolymarketBinaryMarket, PolymarketReadOnlyClient
@@ -76,14 +76,13 @@ class PolymarketArbitrageScanner:
 
             now_ms = int(time.time() * 1000)
             oldest_book_ts = min(yes_snap.timestamp_ms, no_snap.timestamp_ms)
-            # Polymarket CLOB timestamps represent latest book update time;
-            # measure data age relative to fetch receipt time if clock skew occurs,
-            # while honoring stale timestamp rejection when > max_data_age_ms.
-            clob_age_ms = max(0, now_ms - oldest_book_ts)
-            # Also record fetch latency so live REST polls with older resting book updates
-            # are reported transparently.
-            fetch_age_ms = max(0, now_ms - min(yes_snap.fetched_at_ms, no_snap.fetched_at_ms))
-            effective_age_ms = max(fetch_age_ms, min(clob_age_ms, 60_000) if clob_age_ms > 0 else fetch_age_ms)
+            freshness = compute_data_freshness(
+                now_ms=now_ms,
+                yes_book_ts_ms=yes_snap.timestamp_ms,
+                no_book_ts_ms=no_snap.timestamp_ms,
+                yes_fetched_at_ms=yes_snap.fetched_at_ms,
+                no_fetched_at_ms=no_snap.fetched_at_ms,
+            )
 
             eval_res = evaluate_binary_arbitrage(
                 yes_book=yes_snap.book,
@@ -91,7 +90,7 @@ class PolymarketArbitrageScanner:
                 target_shares=target_shares,
                 fee_rate=market.fee_rate,
                 fees_enabled=market.fees_enabled,
-                data_age_ms=clob_age_ms,
+                data_age_ms=freshness.data_age_ms,
                 fee_exponent=market.fee_exponent,
                 slippage_buffer_bps=slippage_buffer_bps,
             )
@@ -128,8 +127,9 @@ class PolymarketArbitrageScanner:
                     "fee_rate": market.fee_rate,
                     "fees_enabled": market.fees_enabled,
                     "fee_type": market.fee_type,
-                    "clob_age_ms": clob_age_ms,
-                    "fetch_age_ms": fetch_age_ms,
+                    "data_age_ms": freshness.data_age_ms,
+                    "clob_age_ms": freshness.clob_age_ms,
+                    "fetch_age_ms": freshness.fetch_age_ms,
                 },
             }
 
@@ -173,7 +173,7 @@ class PolymarketArbitrageScanner:
                     daily_tier_loss_usd=0.0,
                     net_edge_pct=eval_res.net_edge_pct,
                     liquidity_participation_pct=eval_res.liquidity_participation_pct,
-                    data_age_ms=fetch_age_ms,
+                    data_age_ms=freshness.data_age_ms,
                     leg_imbalance_ratio=eval_res.leg_imbalance_ratio,
                     executable=eval_res.executable,
                     identical_settlement_verified=market.identical_settlement_verified,
@@ -205,7 +205,7 @@ class PolymarketArbitrageScanner:
                 "executable": eval_res.executable,
                 "risk_gate_approved": gate_result.approved,
                 "risk_gate_reason": gate_result.summary,
-                "data_age_ms": fetch_age_ms,
+                "data_age_ms": freshness.data_age_ms,
                 "evaluated_at": utc_now_iso(),
             }
             self.store.record_opportunity(opp_record)
