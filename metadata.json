@@ -1,0 +1,8 @@
+{
+  "name": "The Certainty Stack",
+  "description": "Multi-venue prediction-market and quantitative trading platform with fail-closed deterministic Risk Gate, Polymarket CLOB V2 Tier 1 binary arbitrage scanner, and DuckDB historical analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
