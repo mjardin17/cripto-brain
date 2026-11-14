@@ -93,7 +93,10 @@ async function proxyApiRequest(req: Request, res: Response): Promise<void> {
     const contentType = upstream.headers.get('content-type') || 'application/json';
     res.status(upstream.status).type(contentType).send(text);
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Backend unavailable';
+    const raw = err instanceof Error ? err.message : 'Backend unavailable';
+    const message = raw
+      .replace(/AIza[0-9A-Za-z_-]+/g, '[REDACTED_KEY]')
+      .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
     res.status(503).json({
       error: 'FastAPI backend unreachable',
       detail: message,
@@ -107,6 +110,13 @@ async function main() {
   await waitForFastApi();
 
   const app = express();
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    next();
+  });
   app.use(express.json({ limit: '2mb' }));
 
   app.use('/api', proxyApiRequest);

@@ -12,6 +12,7 @@ Policy Guarantees:
 
 from __future__ import annotations
 
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -88,13 +89,11 @@ class CostAwareModelRouter:
         estimated_output_tokens: int = 300,
         estimated_cost_override_usd: float | None = None,
     ) -> dict[str, Any]:
-        """Select routing tier deterministically, enforcing $0.01/task and $0.50/day caps."""
-        pol = self.get_policy()
-        per_task_cap = pol["per_task_limit_usd"]
-        daily_cap = pol["daily_budget_usd"]
-        key_ok = self.is_provider_key_configured()
-        daily_spent = self.get_daily_spend_usd()
-        remaining_daily = round(max(0.0, daily_cap - daily_spent), 6)
+        """Select routing tier deterministically and atomically, enforcing $0.01/task and $0.50/day caps."""
+        if estimated_cost_override_usd is not None:
+            raw_override = float(estimated_cost_override_usd)
+            if not math.isfinite(raw_override) or raw_override < 0.0:
+                raise ValueError("estimated_cost_override_usd must be a finite non-negative number")
 
         cat_upper = task_category.strip().upper()
         deterministic_categories = {
@@ -110,108 +109,118 @@ class CostAwareModelRouter:
         routing_id = f"RTE-{uuid.uuid4().hex[:10].upper()}"
         now_iso = utc_now_iso()
 
-        # 1. Deterministic-first path (always $0.00)
-        if not prefer_ai or cat_upper in deterministic_categories:
-            decision = {
-                "routing_id": routing_id,
-                "task_id": task_id,
-                "agent_id": agent_id,
-                "task_category": cat_upper,
-                "selected_tier": "DETERMINISTIC",
-                "provider": "local_deterministic",
-                "model_name": "deterministic-v1",
-                "api_key_configured": key_ok,
-                "estimated_cost_usd": 0.0,
-                "actual_cost_usd": 0.0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "reason": f"Deterministic-first execution for {cat_upper} ($0.00 cost)",
-                "status": "EXECUTED",
-                "created_at": now_iso,
-            }
-        else:
-            est_cost = (
-                round(float(estimated_cost_override_usd), 6)
-                if estimated_cost_override_usd is not None
-                else self.estimate_cost_usd(
-                    input_tokens=estimated_input_tokens, output_tokens=estimated_output_tokens
-                )
-            )
-            if not key_ok:
+        # Hold the store RLock across policy read, daily spend read, cap decision, and ledger insert
+        # so concurrent AI route calls cannot race past the $0.50/day budget ceiling.
+        with self.store._lock:
+            pol = self.get_policy()
+            per_task_cap = pol["per_task_limit_usd"]
+            daily_cap = pol["daily_budget_usd"]
+            key_ok = self.is_provider_key_configured()
+            daily_spent = self.get_daily_spend_usd()
+            remaining_daily = round(max(0.0, daily_cap - daily_spent), 6)
+
+            # 1. Deterministic-first path (always $0.00)
+            if not prefer_ai or cat_upper in deterministic_categories:
                 decision = {
                     "routing_id": routing_id,
                     "task_id": task_id,
                     "agent_id": agent_id,
                     "task_category": cat_upper,
-                    "selected_tier": "UNAVAILABLE",
+                    "selected_tier": "DETERMINISTIC",
                     "provider": "local_deterministic",
                     "model_name": "deterministic-v1",
-                    "api_key_configured": False,
-                    "estimated_cost_usd": est_cost,
+                    "api_key_configured": key_ok,
+                    "estimated_cost_usd": 0.0,
                     "actual_cost_usd": 0.0,
                     "input_tokens": 0,
                     "output_tokens": 0,
-                    "reason": "No authorized GEMINI_API_KEY configured; fell back cleanly with $0.00 spent",
-                    "status": "FALLBACK_DETERMINISTIC",
-                    "created_at": now_iso,
-                }
-            elif est_cost > per_task_cap:
-                decision = {
-                    "routing_id": routing_id,
-                    "task_id": task_id,
-                    "agent_id": agent_id,
-                    "task_category": cat_upper,
-                    "selected_tier": "BLOCKED_BUDGET",
-                    "provider": "none",
-                    "model_name": pol["economical_model"],
-                    "api_key_configured": True,
-                    "estimated_cost_usd": est_cost,
-                    "actual_cost_usd": 0.0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "reason": f"Blocked: estimated task cost ${est_cost:.4f} exceeds per-task cap ${per_task_cap:.2f}",
-                    "status": "BLOCKED",
-                    "created_at": now_iso,
-                }
-            elif est_cost > remaining_daily:
-                decision = {
-                    "routing_id": routing_id,
-                    "task_id": task_id,
-                    "agent_id": agent_id,
-                    "task_category": cat_upper,
-                    "selected_tier": "BLOCKED_BUDGET",
-                    "provider": "none",
-                    "model_name": pol["economical_model"],
-                    "api_key_configured": True,
-                    "estimated_cost_usd": est_cost,
-                    "actual_cost_usd": 0.0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "reason": f"Blocked: projected spend exceeds daily cap ${daily_cap:.2f} (remaining ${remaining_daily:.4f})",
-                    "status": "BLOCKED",
-                    "created_at": now_iso,
-                }
-            else:
-                # Economical AI authorized within strict caps
-                decision = {
-                    "routing_id": routing_id,
-                    "task_id": task_id,
-                    "agent_id": agent_id,
-                    "task_category": cat_upper,
-                    "selected_tier": "ECONOMICAL_AI",
-                    "provider": "gemini",
-                    "model_name": pol["economical_model"],
-                    "api_key_configured": True,
-                    "estimated_cost_usd": est_cost,
-                    "actual_cost_usd": est_cost,
-                    "input_tokens": int(max(0, estimated_input_tokens)),
-                    "output_tokens": int(max(0, estimated_output_tokens)),
-                    "reason": f"Authorized economical AI tier within caps (${est_cost:.6f} <= ${per_task_cap:.2f}/task)",
+                    "reason": f"Deterministic-first execution for {cat_upper} ($0.00 cost)",
                     "status": "EXECUTED",
                     "created_at": now_iso,
                 }
+            else:
+                token_cost = self.estimate_cost_usd(
+                    input_tokens=estimated_input_tokens, output_tokens=estimated_output_tokens
+                )
+                est_cost = (
+                    max(token_cost, round(float(estimated_cost_override_usd), 6))
+                    if estimated_cost_override_usd is not None
+                    else token_cost
+                )
+                if not key_ok:
+                    decision = {
+                        "routing_id": routing_id,
+                        "task_id": task_id,
+                        "agent_id": agent_id,
+                        "task_category": cat_upper,
+                        "selected_tier": "UNAVAILABLE",
+                        "provider": "local_deterministic",
+                        "model_name": "deterministic-v1",
+                        "api_key_configured": False,
+                        "estimated_cost_usd": est_cost,
+                        "actual_cost_usd": 0.0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "reason": "No authorized GEMINI_API_KEY configured; fell back cleanly with $0.00 spent",
+                        "status": "FALLBACK_DETERMINISTIC",
+                        "created_at": now_iso,
+                    }
+                elif est_cost > per_task_cap:
+                    decision = {
+                        "routing_id": routing_id,
+                        "task_id": task_id,
+                        "agent_id": agent_id,
+                        "task_category": cat_upper,
+                        "selected_tier": "BLOCKED_BUDGET",
+                        "provider": "none",
+                        "model_name": pol["economical_model"],
+                        "api_key_configured": True,
+                        "estimated_cost_usd": est_cost,
+                        "actual_cost_usd": 0.0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "reason": f"Blocked: estimated task cost ${est_cost:.4f} exceeds per-task cap ${per_task_cap:.2f}",
+                        "status": "BLOCKED",
+                        "created_at": now_iso,
+                    }
+                elif est_cost > remaining_daily:
+                    decision = {
+                        "routing_id": routing_id,
+                        "task_id": task_id,
+                        "agent_id": agent_id,
+                        "task_category": cat_upper,
+                        "selected_tier": "BLOCKED_BUDGET",
+                        "provider": "none",
+                        "model_name": pol["economical_model"],
+                        "api_key_configured": True,
+                        "estimated_cost_usd": est_cost,
+                        "actual_cost_usd": 0.0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "reason": f"Blocked: projected spend exceeds daily cap ${daily_cap:.2f} (remaining ${remaining_daily:.4f})",
+                        "status": "BLOCKED",
+                        "created_at": now_iso,
+                    }
+                else:
+                    # Economical AI authorized within strict caps
+                    decision = {
+                        "routing_id": routing_id,
+                        "task_id": task_id,
+                        "agent_id": agent_id,
+                        "task_category": cat_upper,
+                        "selected_tier": "ECONOMICAL_AI",
+                        "provider": "gemini",
+                        "model_name": pol["economical_model"],
+                        "api_key_configured": True,
+                        "estimated_cost_usd": est_cost,
+                        "actual_cost_usd": est_cost,
+                        "input_tokens": int(max(0, estimated_input_tokens)),
+                        "output_tokens": int(max(0, estimated_output_tokens)),
+                        "reason": f"Authorized economical AI tier within caps (${est_cost:.6f} <= ${per_task_cap:.2f}/task)",
+                        "status": "EXECUTED",
+                        "created_at": now_iso,
+                    }
 
-        with self.store._lock:
             self.store._conn.execute(
                 """
                 INSERT INTO model_routing_log VALUES (

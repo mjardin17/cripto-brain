@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -35,6 +36,19 @@ from backend.risk_gate.policy import RiskPolicy
 from backend.storage.duckdb_store import DuckDBStore, utc_now_iso
 from backend.venues.kalshi import KalshiReadOnlyClient
 from backend.venues.polymarket import PolymarketReadOnlyClient
+
+
+def sanitize_error_message(raw: Any) -> str:
+    """Redact any environment secret values or credential patterns from error strings."""
+    text = str(raw or "")
+    for env_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "KALSHI_API_KEY", "POLYMARKET_API_KEY", "PRIVATE_KEY", "WALLET_PRIVATE_KEY"):
+        secret = os.environ.get(env_name, "").strip()
+        if len(secret) >= 6:
+            text = text.replace(secret, "[REDACTED_SECRET]")
+    text = re.sub(r"AIza[0-9A-Za-z_-]+", "[REDACTED_KEY]", text)
+    text = re.sub(r"Bearer\s+\S+", "Bearer [REDACTED]", text, flags=re.IGNORECASE)
+    text = re.sub(r"(api[_-]?key|token|secret)\s*=\s*\S+", r"\1=[REDACTED]", text, flags=re.IGNORECASE)
+    return text
 
 
 class ScanRequest(BaseModel):
@@ -509,18 +523,21 @@ def create_app(
 
     @app.post("/api/memory/structured")
     async def create_structured_memory(req: StructuredMemoryCreateRequest) -> dict[str, Any]:
-        return memory_manager.record_candidate(
-            memory_tier=req.memory_tier,
-            category=req.category,
-            title=req.title,
-            summary=req.summary,
-            source_agent=req.source_agent,
-            content=req.content,
-            evidence=req.evidence,
-            tags=req.tags,
-            confidence=req.confidence,
-            explicit_key=req.explicit_key,
-        )
+        try:
+            return memory_manager.record_candidate(
+                memory_tier=req.memory_tier,
+                category=req.category,
+                title=req.title,
+                summary=req.summary,
+                source_agent=req.source_agent,
+                content=req.content,
+                evidence=req.evidence,
+                tags=req.tags,
+                confidence=req.confidence,
+                explicit_key=req.explicit_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
 
     @app.get("/api/memory/structured/{memory_id}/versions")
     async def get_structured_memory_versions(memory_id: str) -> dict[str, Any]:
@@ -646,20 +663,23 @@ def create_app(
 
     @app.post("/api/intelligence/predictions")
     async def create_prediction(req: PredictionCreateRequest) -> dict[str, Any]:
-        return prob_engine.record_prediction(
-            agent_id=req.agent_id,
-            market_id=req.market_id,
-            venue=req.venue,
-            subject_key=req.subject_key,
-            question=req.question,
-            predicted_prob=req.predicted_prob,
-            market_implied_prob=req.market_implied_prob,
-            confidence=req.confidence,
-            rationale=req.rationale,
-            evidence=req.evidence,
-            provenance=req.provenance,
-            market_category=req.market_category,
-        )
+        try:
+            return prob_engine.record_prediction(
+                agent_id=req.agent_id,
+                market_id=req.market_id,
+                venue=req.venue,
+                subject_key=req.subject_key,
+                question=req.question,
+                predicted_prob=req.predicted_prob,
+                market_implied_prob=req.market_implied_prob,
+                confidence=req.confidence,
+                rationale=req.rationale,
+                evidence=req.evidence,
+                provenance=req.provenance,
+                market_category=req.market_category,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
 
     @app.post("/api/intelligence/predictions/{prediction_id}/resolve")
     async def resolve_prediction(prediction_id: str, req: PredictionResolveRequest) -> dict[str, Any]:
@@ -694,15 +714,18 @@ def create_app(
 
     @app.post("/api/intelligence/model-routing/route")
     async def route_model_request(req: ModelRouteRequest) -> dict[str, Any]:
-        return model_router.route_task(
-            task_id=req.task_id,
-            agent_id=req.agent_id,
-            task_category=req.task_category,
-            prefer_ai=req.prefer_ai,
-            estimated_input_tokens=req.estimated_input_tokens,
-            estimated_output_tokens=req.estimated_output_tokens,
-            estimated_cost_override_usd=req.estimated_cost_override_usd,
-        )
+        try:
+            return model_router.route_task(
+                task_id=req.task_id,
+                agent_id=req.agent_id,
+                task_category=req.task_category,
+                prefer_ai=req.prefer_ai,
+                estimated_input_tokens=req.estimated_input_tokens,
+                estimated_output_tokens=req.estimated_output_tokens,
+                estimated_cost_override_usd=req.estimated_cost_override_usd,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
 
     @app.get("/api/intelligence/configs")
     async def list_configs(
@@ -982,14 +1005,20 @@ def create_app(
         try:
             poly_mkt = await app.state.poly_client.fetch_market(req.poly_market_id.strip())
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Polymarket metadata fetch failed: {exc}") from exc
+            raise HTTPException(
+                status_code=502,
+                detail=f"Polymarket metadata fetch failed: {sanitize_error_message(exc)}",
+            ) from exc
         if poly_mkt is None:
             raise HTTPException(status_code=404, detail=f"Polymarket market '{req.poly_market_id}' not found or non-binary")
 
         try:
             kalshi_mkt = await app.state.kalshi_client.fetch_market(req.kalshi_ticker.strip())
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Kalshi metadata fetch failed: {exc}") from exc
+            raise HTTPException(
+                status_code=502,
+                detail=f"Kalshi metadata fetch failed: {sanitize_error_message(exc)}",
+            ) from exc
         if kalshi_mkt is None:
             raise HTTPException(status_code=404, detail=f"Kalshi market '{req.kalshi_ticker}' not found or non-binary")
 
@@ -1076,7 +1105,7 @@ def create_app(
                     }
                 )
             except Exception as exc:
-                errors.append({"pair_id": pair["pair_id"], "error": str(exc)})
+                errors.append({"pair_id": pair["pair_id"], "error": sanitize_error_message(exc)})
 
         return {"provenance": "LIVE", "count": len(results), "results": results, "errors": errors}
 
@@ -1085,9 +1114,12 @@ def create_app(
         try:
             return await paper_engine.execute(req)
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise HTTPException(status_code=404, detail=sanitize_error_message(exc)) from exc
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Paper execution book fetch failed: {exc}") from exc
+            raise HTTPException(
+                status_code=502,
+                detail=f"Paper execution book fetch failed: {sanitize_error_message(exc)}",
+            ) from exc
 
     @app.get("/api/paper/blotter")
     async def paper_blotter(limit: int = Query(default=100, ge=1, le=300)) -> dict[str, Any]:

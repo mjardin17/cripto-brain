@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import tempfile
 import time
@@ -502,9 +503,17 @@ class ResearchQualityValidator:
         src_dt = _parse_iso(source_timestamp)
         findings: list[str] = []
 
-        # 1. Prompt injection & untrusted external payload check
+        # 1. Prompt injection & untrusted external payload check (including nested claims & metadata)
+        claims_text = json.dumps(conflicting_claims, ensure_ascii=False) if conflicting_claims else ""
+        cross_text = json.dumps(cross_venue_check, ensure_ascii=False) if cross_venue_check else ""
         inj_hits = self.detect_prompt_injection(
-            raw_external_text, evidence_summary, market_question, source_identifier
+            raw_external_text,
+            evidence_summary,
+            market_question,
+            source_identifier,
+            agent_id,
+            claims_text,
+            cross_text,
         )
         injection_detected = len(inj_hits) > 0
         if injection_detected:
@@ -626,7 +635,12 @@ class ResearchQualityValidator:
                 findings.extend(list(eq_res.mismatch_reasons))
 
         # 6. Evidence sufficiency & final fail-closed status
-        eff_conf = round(min(1.0, max(0.0, float(confidence))), 4)
+        conf_raw = float(confidence)
+        if not math.isfinite(conf_raw):
+            eff_conf = 0.0
+            findings.append("Non-finite confidence value rejected (fail-closed)")
+        else:
+            eff_conf = round(min(1.0, max(0.0, conf_raw)), 4)
         ev_clean = evidence_summary.strip()
         evidence_sufficient = bool(source_identifier.strip()) and len(ev_clean) >= 20 and eff_conf >= 0.45
         if not evidence_sufficient:

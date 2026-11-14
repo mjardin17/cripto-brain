@@ -25,13 +25,19 @@ ALLOWED_CONFIG_DOMAINS = {"AGENT_PIPELINE", "MODEL_ROUTING", "CALIBRATION_PARAMS
 
 
 def compute_brier_score(predicted_prob: float, actual_outcome: int) -> float:
-    p = min(1.0, max(0.0, float(predicted_prob)))
+    raw_p = float(predicted_prob)
+    if not math.isfinite(raw_p):
+        raise ValueError("predicted_prob must be finite")
+    p = min(1.0, max(0.0, raw_p))
     y = 1 if int(actual_outcome) == 1 else 0
     return round((p - y) ** 2, 6)
 
 
 def compute_log_loss(predicted_prob: float, actual_outcome: int, eps: float = 1e-6) -> float:
-    p = min(1.0 - eps, max(eps, float(predicted_prob)))
+    raw_p = float(predicted_prob)
+    if not math.isfinite(raw_p):
+        raise ValueError("predicted_prob must be finite")
+    p = min(1.0 - eps, max(eps, raw_p))
     y = 1 if int(actual_outcome) == 1 else 0
     loss = -(y * math.log(p) + (1 - y) * math.log(1.0 - p))
     return round(loss, 6)
@@ -101,8 +107,14 @@ class ProbabilityIntelligenceEngine:
         provenance: str = "SIMULATED",
         market_category: str = "general",
     ) -> dict[str, Any]:
-        p = round(min(0.9999, max(0.0001, float(predicted_prob))), 6)
-        conf = round(min(1.0, max(0.0, float(confidence))), 4)
+        raw_p = float(predicted_prob)
+        raw_conf = float(confidence)
+        if not math.isfinite(raw_p) or not math.isfinite(raw_conf):
+            raise ValueError("predicted_prob and confidence must be finite numbers")
+        if market_implied_prob is not None and not math.isfinite(float(market_implied_prob)):
+            raise ValueError("market_implied_prob must be a finite number")
+        p = round(min(0.9999, max(0.0001, raw_p)), 6)
+        conf = round(min(1.0, max(0.0, raw_conf)), 4)
         imp = (
             round(min(0.9999, max(0.0001, float(market_implied_prob))), 6)
             if market_implied_prob is not None
@@ -904,6 +916,12 @@ class ConfigGovernanceManager:
                 raise ValueError(f"Version {target_version} not found for domain '{dom}'")
             cols = [d[0] for d in self.store._conn.description]
             snap = self._row_to_config(cols, snap_row)
+            if snap.get("config", {}).get("live_trading_enabled") is True or snap.get("config", {}).get("ai_override"):
+                raise PermissionError("Safety lock: cannot rollback to a configuration enabling live trading or AI override")
+            if not bool(snap.get("regression_passed", False)):
+                raise ValueError(
+                    f"Self-test gate failed closed: version {target_version} for '{dom}' has not passed regression verification"
+                )
 
             max_ver = self.store._conn.execute(
                 "SELECT COALESCE(MAX(version), 0) FROM config_versions WHERE config_domain = ?",

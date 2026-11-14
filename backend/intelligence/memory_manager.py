@@ -258,7 +258,12 @@ class StructuredMemoryManager:
         if tier_norm not in VALID_TIERS:
             raise ValueError(f"Unsupported memory_tier '{memory_tier}'")
 
-        conf = round(max(0.0, min(1.0, float(confidence))), 4)
+        conf_raw = float(confidence)
+        if not math.isfinite(conf_raw):
+            raise ValueError("confidence must be a finite float")
+        if ttl_hours is not None and not math.isfinite(float(ttl_hours)):
+            raise ValueError("ttl_hours must be a finite float")
+        conf = round(max(0.0, min(1.0, conf_raw)), 4)
         content_obj = dict(content or {})
         evidence_list = normalize_evidence_list(evidence)
         tags_list = sorted({str(t).strip().lower() for t in (tags or []) if str(t).strip()})
@@ -623,6 +628,8 @@ class StructuredMemoryManager:
                 if evidence is not None
                 else list(entry["evidence"])
             )
+            if confidence is not None and not math.isfinite(float(confidence)):
+                raise ValueError("confidence must be a finite float")
             new_conf = (
                 round(max(0.0, min(1.0, float(confidence))), 4)
                 if confidence is not None
