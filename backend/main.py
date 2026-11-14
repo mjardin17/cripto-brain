@@ -16,7 +16,16 @@ from backend.execution.paper_simulator import PaperExecutionEngine, PaperExecuti
 from backend.future.modules import get_module_registry
 from backend.intelligence.learning_engine import LearningEngine
 from backend.intelligence.memory_manager import MemoryTier, StructuredMemoryManager
+from backend.intelligence.model_router import CostAwareModelRouter
+from backend.intelligence.operations import OperationalHealthMonitor, SoakMode, SoakTestManager
+from backend.intelligence.probability import ConfigGovernanceManager, ProbabilityIntelligenceEngine
 from backend.intelligence.supervisor import SupervisorOrchestrator
+from backend.intelligence.validation_labs import (
+    AdversarialReviewEngine,
+    ConcurrencyStressLab,
+    PaperStressLab,
+    ResearchQualityValidator,
+)
 from backend.risk_gate.engine import (
     DeterministicRiskGate,
     RiskEvaluationRequest,
@@ -112,7 +121,115 @@ class WorkerScaleRequest(BaseModel):
     max_concurrency: int | None = Field(default=None, ge=1, le=8)
 
 
-def create_app(db_path: str | None = None) -> FastAPI:
+class BackgroundLoopStartRequest(BaseModel):
+    interval_seconds: float = Field(default=5.0, ge=0.05, le=60.0)
+    max_tasks_per_tick: int = Field(default=4, ge=1, le=8)
+
+
+class PredictionCreateRequest(BaseModel):
+    agent_id: str = Field(min_length=2, max_length=64)
+    market_id: str = Field(min_length=1, max_length=128)
+    venue: str = Field(default="polymarket", min_length=2, max_length=32)
+    subject_key: str = Field(min_length=2, max_length=120)
+    question: str = Field(min_length=3, max_length=300)
+    predicted_prob: float = Field(ge=0.0, le=1.0)
+    market_implied_prob: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence: float = Field(default=0.70, ge=0.0, le=1.0)
+    rationale: str = Field(default="", max_length=600)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    provenance: str = Field(default="SIMULATED", max_length=24)
+    market_category: str = Field(default="general", min_length=1, max_length=64)
+
+
+class PredictionResolveRequest(BaseModel):
+    outcome: int | str
+    resolution_source: str = Field(default="confirmed_settlement", min_length=2, max_length=120)
+    reviewer_id: str = Field(default="calibration_auditor", min_length=2, max_length=64)
+
+
+class ModelRouteRequest(BaseModel):
+    task_id: str | None = Field(default=None, max_length=64)
+    agent_id: str = Field(min_length=2, max_length=64)
+    task_category: str = Field(min_length=2, max_length=64)
+    prefer_ai: bool = False
+    estimated_input_tokens: int = Field(default=800, ge=0, le=500_000)
+    estimated_output_tokens: int = Field(default=300, ge=0, le=100_000)
+    estimated_cost_override_usd: float | None = Field(default=None, ge=0.0, le=100.0)
+
+
+class ConfigProposeRequest(BaseModel):
+    config_domain: str = Field(min_length=2, max_length=64)
+    proposed_config: dict[str, Any] = Field(default_factory=dict)
+    proposed_by: str = Field(min_length=2, max_length=64)
+    change_reason: str = Field(min_length=3, max_length=300)
+    source_cycle_id: str | None = Field(default=None, max_length=64)
+    regression_case_id: str | None = Field(default=None, max_length=64)
+
+
+class ConfigActivateRequest(BaseModel):
+    reviewed_by: str = Field(min_length=2, max_length=64)
+
+
+class ConfigRollbackRequest(BaseModel):
+    config_domain: str = Field(min_length=2, max_length=64)
+    target_version: int = Field(ge=1)
+    actor: str = Field(default="operator", min_length=2, max_length=64)
+    reason: str = Field(default="Operator configuration rollback", min_length=3, max_length=240)
+
+
+class SoakStartRequest(BaseModel):
+    mode: SoakMode = "SHORT_VALIDATION"
+    duration_seconds: float | None = Field(default=None, ge=0.2, le=259200.0)
+    tick_interval_seconds: float = Field(default=2.0, ge=0.1, le=60.0)
+
+
+class SoakStopRequest(BaseModel):
+    run_id: str | None = Field(default=None, max_length=64)
+    reason: str = Field(default="Stopped manually before target duration completed", max_length=240)
+
+
+class ConcurrencyStressRequest(BaseModel):
+    task_count: int = Field(default=12, ge=4, le=32)
+    worker_count: int = Field(default=4, ge=2, le=8)
+
+
+class ResearchValidationRequest(BaseModel):
+    agent_id: str = Field(default="market_intelligence_agent", min_length=2, max_length=64)
+    source_identifier: str = Field(default="", max_length=160)
+    source_timestamp: str | None = None
+    retrieval_timestamp: str | None = None
+    evidence_summary: str = Field(default="", max_length=1200)
+    market_id: str = Field(default="", max_length=128)
+    market_question: str = Field(default="", max_length=400)
+    raw_external_text: str = Field(default="", max_length=2000)
+    confidence: float = Field(default=0.70, ge=0.0, le=1.0)
+    conflicting_claims: list[dict[str, Any]] = Field(default_factory=list)
+    cross_venue_check: dict[str, Any] | None = None
+    max_age_ms: int = Field(default=15000, ge=100, le=600000)
+
+
+class PaperStressRequest(BaseModel):
+    scenarios: list[str] | None = None
+    target_shares: float = Field(default=25.0, gt=0.0, le=500.0)
+
+
+class AdversarialReviewRequest(BaseModel):
+    subject_key: str = Field(min_length=2, max_length=120)
+    conclusion_agent: str = Field(min_length=2, max_length=64)
+    conclusion_summary: str = Field(min_length=3, max_length=600)
+    proposer_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    challenger_agent: str | None = Field(default=None, max_length=64)
+    arbiter_agent: str | None = Field(default=None, max_length=64)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    opposing_evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def create_app(
+    db_path: str | None = None,
+    *,
+    enable_background_loop: bool = True,
+    loop_interval_seconds: float = 5.0,
+) -> FastAPI:
     store = DuckDBStore(db_path=db_path)
     policy = RiskPolicy()
     risk_gate = DeterministicRiskGate(store=store, policy=policy)
@@ -127,6 +244,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
     )
     memory_manager = StructuredMemoryManager(store=store)
     learning_engine = LearningEngine(store=store, memory_manager=memory_manager)
+    prob_engine = ProbabilityIntelligenceEngine(store=store, learning=learning_engine)
+    config_manager = ConfigGovernanceManager(store=store, learning=learning_engine)
+    model_router = CostAwareModelRouter(store=store)
     supervisor = SupervisorOrchestrator(
         store=store,
         risk_gate=risk_gate,
@@ -134,17 +254,39 @@ def create_app(db_path: str | None = None) -> FastAPI:
         learning=learning_engine,
         scanner=scanner,
         cross_scanner=cross_scanner,
+        model_router=model_router,
+    )
+    health_monitor = OperationalHealthMonitor(
+        store=store, supervisor=supervisor, model_router=model_router
+    )
+    soak_manager = SoakTestManager(
+        store=store,
+        supervisor=supervisor,
+        health_monitor=health_monitor,
+        model_router=model_router,
+    )
+    supervisor.register_tick_hook(soak_manager.tick_active_soak)
+    concurrency_lab = ConcurrencyStressLab(store=store, learning=learning_engine)
+    research_validator = ResearchQualityValidator(store=store, learning=learning_engine)
+    paper_stress_lab = PaperStressLab(store=store, learning=learning_engine)
+    adversarial_engine = AdversarialReviewEngine(
+        store=store, memory=memory_manager, learning=learning_engine
     )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        yield
-        store.close()
+        if enable_background_loop and os.environ.get("CERTAINTY_DISABLE_SUPERVISOR_LOOP") != "1":
+            await supervisor.start_background_loop(interval_seconds=loop_interval_seconds)
+        try:
+            yield
+        finally:
+            await supervisor.stop_background_loop()
+            store.close()
 
     app = FastAPI(
         title="The Certainty Stack API",
-        version="0.3.0-stage3c",
-        description="Independent fail-closed Risk Gate, Polymarket + Kalshi read-only ingestion, cross-venue paper simulator, structured memory & learning core, multi-agent Supervisor, and DuckDB analytics.",
+        version="0.3.0-stage3e",
+        description="Independent fail-closed Risk Gate, Polymarket + Kalshi read-only ingestion, cross-venue paper simulator, structured memory & learning core, multi-agent Supervisor, continuous operations monitor, validation labs, and DuckDB analytics.",
         lifespan=lifespan,
     )
 
@@ -155,7 +297,16 @@ def create_app(db_path: str | None = None) -> FastAPI:
     app.state.paper_engine = paper_engine
     app.state.memory_manager = memory_manager
     app.state.learning_engine = learning_engine
+    app.state.prob_engine = prob_engine
+    app.state.config_manager = config_manager
+    app.state.model_router = model_router
     app.state.supervisor = supervisor
+    app.state.health_monitor = health_monitor
+    app.state.soak_manager = soak_manager
+    app.state.concurrency_lab = concurrency_lab
+    app.state.research_validator = research_validator
+    app.state.paper_stress_lab = paper_stress_lab
+    app.state.adversarial_engine = adversarial_engine
     app.state.poly_client = poly_client
     app.state.kalshi_client = kalshi_client
 
@@ -469,6 +620,302 @@ def create_app(db_path: str | None = None) -> FastAPI:
     async def list_agent_blockers(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
         items = supervisor.blocker_engine.list_blockers(limit=limit)
         return {"count": len(items), "items": items}
+
+    @app.post("/api/agents/loop/start")
+    async def start_agent_loop(req: BackgroundLoopStartRequest) -> dict[str, Any]:
+        return await supervisor.start_background_loop(
+            interval_seconds=req.interval_seconds,
+            max_tasks_per_tick=req.max_tasks_per_tick,
+        )
+
+    @app.post("/api/agents/loop/stop")
+    async def stop_agent_loop() -> dict[str, Any]:
+        return await supervisor.stop_background_loop()
+
+    # ------------------------------------------------------------------
+    # Stage 3D: Probability Intelligence, Model Routing, Config Governance & Command Center
+    # ------------------------------------------------------------------
+    @app.get("/api/intelligence/predictions")
+    async def list_predictions(
+        status: str | None = Query(default=None),
+        agent_id: str | None = Query(default=None),
+        limit: int = Query(default=80, ge=1, le=300),
+    ) -> dict[str, Any]:
+        items = prob_engine.list_predictions(status=status, agent_id=agent_id, limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/intelligence/predictions")
+    async def create_prediction(req: PredictionCreateRequest) -> dict[str, Any]:
+        return prob_engine.record_prediction(
+            agent_id=req.agent_id,
+            market_id=req.market_id,
+            venue=req.venue,
+            subject_key=req.subject_key,
+            question=req.question,
+            predicted_prob=req.predicted_prob,
+            market_implied_prob=req.market_implied_prob,
+            confidence=req.confidence,
+            rationale=req.rationale,
+            evidence=req.evidence,
+            provenance=req.provenance,
+            market_category=req.market_category,
+        )
+
+    @app.post("/api/intelligence/predictions/{prediction_id}/resolve")
+    async def resolve_prediction(prediction_id: str, req: PredictionResolveRequest) -> dict[str, Any]:
+        try:
+            return prob_engine.resolve_prediction(
+                prediction_id,
+                outcome=req.outcome,
+                resolution_source=req.resolution_source,
+                reviewer_id=req.reviewer_id,
+            )
+        except ValueError as exc:
+            msg = str(exc)
+            code = 404 if "Unknown prediction_id" in msg else 400
+            raise HTTPException(status_code=code, detail=msg) from exc
+
+    @app.get("/api/intelligence/calibration")
+    async def calibration_summary(
+        agent_id: str | None = Query(default=None),
+        num_buckets: int = Query(default=10, ge=2, le=20),
+    ) -> dict[str, Any]:
+        return prob_engine.compute_calibration_summary(agent_id=agent_id, num_buckets=num_buckets)
+
+    @app.get("/api/intelligence/scorecards")
+    async def agent_scorecards(
+        min_resolved_samples: int = Query(default=10, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return prob_engine.get_agent_scorecards(min_resolved_samples=min_resolved_samples)
+
+    @app.get("/api/intelligence/model-routing")
+    async def model_routing_summary(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+        return model_router.get_usage_summary(limit=limit)
+
+    @app.post("/api/intelligence/model-routing/route")
+    async def route_model_request(req: ModelRouteRequest) -> dict[str, Any]:
+        return model_router.route_task(
+            task_id=req.task_id,
+            agent_id=req.agent_id,
+            task_category=req.task_category,
+            prefer_ai=req.prefer_ai,
+            estimated_input_tokens=req.estimated_input_tokens,
+            estimated_output_tokens=req.estimated_output_tokens,
+            estimated_cost_override_usd=req.estimated_cost_override_usd,
+        )
+
+    @app.get("/api/intelligence/configs")
+    async def list_configs(
+        config_domain: str | None = Query(default=None),
+        limit: int = Query(default=60, ge=1, le=200),
+    ) -> dict[str, Any]:
+        items = config_manager.list_versions(config_domain=config_domain, limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/intelligence/configs/propose")
+    async def propose_config(req: ConfigProposeRequest) -> dict[str, Any]:
+        try:
+            return config_manager.propose_config_update(
+                config_domain=req.config_domain,
+                proposed_config=req.proposed_config,
+                proposed_by=req.proposed_by,
+                change_reason=req.change_reason,
+                source_cycle_id=req.source_cycle_id,
+                regression_case_id=req.regression_case_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/intelligence/configs/{config_version_id}/activate")
+    async def activate_config(config_version_id: str, req: ConfigActivateRequest) -> dict[str, Any]:
+        try:
+            return config_manager.activate_config_version(
+                config_version_id,
+                reviewed_by=req.reviewed_by,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            msg = str(exc)
+            code = 404 if "Unknown config_version_id" in msg else 400
+            raise HTTPException(status_code=code, detail=msg) from exc
+
+    @app.post("/api/intelligence/configs/rollback")
+    async def rollback_config(req: ConfigRollbackRequest) -> dict[str, Any]:
+        try:
+            return config_manager.rollback_config(
+                config_domain=req.config_domain,
+                target_version=req.target_version,
+                actor=req.actor,
+                reason=req.reason,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/intelligence/command-center")
+    async def intelligence_command_center() -> dict[str, Any]:
+        cal_cfg = config_manager.get_active_config("CALIBRATION_PARAMS") or {}
+        min_samples = int(
+            (cal_cfg.get("config") or {}).get(
+                "min_resolved_samples_for_comparison",
+                prob_engine.DEFAULT_MIN_SAMPLES_FOR_COMPARISON,
+            )
+        )
+        num_buckets = int((cal_cfg.get("config") or {}).get("num_calibration_buckets", 10))
+        return {
+            "phase": "Phase 3 — Stage 3E Autonomous Operations & Intelligence Validation",
+            "live_trading_enabled": False,
+            "supervisor": supervisor.get_status_snapshot(),
+            "tasks": supervisor.list_tasks(limit=80),
+            "blockers": supervisor.blocker_engine.list_blockers(limit=50),
+            "calibration": prob_engine.compute_calibration_summary(num_buckets=num_buckets),
+            "scorecards": prob_engine.get_agent_scorecards(min_resolved_samples=min_samples),
+            "predictions": prob_engine.list_predictions(limit=80),
+            "model_routing": model_router.get_usage_summary(limit=40),
+            "configs": config_manager.list_versions(limit=60),
+            "memory_counts": store.get_counts(),
+            "learning_cycles": learning_engine.list_cycles(limit=40),
+            "regression_cases": learning_engine.list_regression_cases(limit=40),
+            "operational_health": health_monitor.get_health_report(),
+            "system_events": store.list_system_events(limit=50),
+            "soak_runs": soak_manager.list_runs(limit=25),
+            "concurrency_stress_runs": concurrency_lab.list_runs(limit=20),
+            "historical_validation": prob_engine.compute_historical_validation(min_resolved_samples=min_samples),
+            "research_validations": research_validator.list_validations(limit=30),
+            "adversarial_reviews": adversarial_engine.list_reviews(limit=30),
+            "paper_stress_runs": paper_stress_lab.list_runs(limit=40),
+            "generated_at": utc_now_iso(),
+        }
+
+    # ------------------------------------------------------------------
+    # Stage 3E: Continuous Operations, Soak Framework & Validation Labs
+    # ------------------------------------------------------------------
+    @app.get("/api/operations/health")
+    async def operations_health(
+        long_running_threshold_seconds: float = Query(default=60.0, ge=5.0, le=3600.0),
+    ) -> dict[str, Any]:
+        return health_monitor.get_health_report(
+            long_running_threshold_seconds=long_running_threshold_seconds
+        )
+
+    @app.get("/api/operations/events")
+    async def operations_events(
+        severity: str | None = Query(default=None),
+        limit: int = Query(default=80, ge=1, le=300),
+    ) -> dict[str, Any]:
+        items = store.list_system_events(severity=severity, limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.get("/api/operations/soak")
+    async def list_soak_runs(limit: int = Query(default=30, ge=1, le=100)) -> dict[str, Any]:
+        items = soak_manager.list_runs(limit=limit)
+        return {"count": len(items), "active_run": soak_manager.get_active_run(), "items": items}
+
+    @app.post("/api/operations/soak/start")
+    async def start_soak_run(req: SoakStartRequest) -> dict[str, Any]:
+        try:
+            return soak_manager.start_soak(
+                mode=req.mode,
+                duration_seconds=req.duration_seconds,
+                tick_interval_seconds=req.tick_interval_seconds,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/operations/soak/stop")
+    async def stop_soak_run(req: SoakStopRequest) -> dict[str, Any]:
+        try:
+            return soak_manager.stop_soak(run_id=req.run_id, reason=req.reason)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/validation/concurrency-stress")
+    async def list_concurrency_stress(limit: int = Query(default=25, ge=1, le=100)) -> dict[str, Any]:
+        items = concurrency_lab.list_runs(limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/validation/concurrency-stress")
+    async def run_concurrency_stress(req: ConcurrencyStressRequest) -> dict[str, Any]:
+        return await concurrency_lab.run_stress_suite(
+            task_count=req.task_count,
+            worker_count=req.worker_count,
+        )
+
+    @app.get("/api/validation/predictions/historical")
+    async def historical_prediction_validation(
+        agent_id: str | None = Query(default=None),
+        market_category: str | None = Query(default=None),
+        min_resolved_samples: int = Query(default=10, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return prob_engine.compute_historical_validation(
+            agent_id=agent_id,
+            market_category=market_category,
+            min_resolved_samples=min_resolved_samples,
+        )
+
+    @app.get("/api/validation/research")
+    async def list_research_validations(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+        items = research_validator.list_validations(limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/validation/research")
+    async def validate_research_submission(req: ResearchValidationRequest) -> dict[str, Any]:
+        return research_validator.validate_submission(
+            agent_id=req.agent_id,
+            source_identifier=req.source_identifier,
+            source_timestamp=req.source_timestamp,
+            retrieval_timestamp=req.retrieval_timestamp,
+            evidence_summary=req.evidence_summary,
+            market_id=req.market_id,
+            market_question=req.market_question,
+            raw_external_text=req.raw_external_text,
+            confidence=req.confidence,
+            conflicting_claims=req.conflicting_claims,
+            cross_venue_check=req.cross_venue_check,
+            max_age_ms=req.max_age_ms,
+        )
+
+    @app.get("/api/validation/paper-stress")
+    async def list_paper_stress(limit: int = Query(default=60, ge=1, le=200)) -> dict[str, Any]:
+        items = paper_stress_lab.list_runs(limit=limit)
+        return {"count": len(items), "provenance": "SIMULATED", "items": items}
+
+    @app.post("/api/validation/paper-stress")
+    async def run_paper_stress(req: PaperStressRequest) -> dict[str, Any]:
+        try:
+            return await paper_stress_lab.run_scenario_suite(
+                scenarios=req.scenarios,
+                target_shares=req.target_shares,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/validation/adversarial-review")
+    async def list_adversarial_reviews(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+        items = adversarial_engine.list_reviews(limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/validation/adversarial-review")
+    async def run_adversarial_review(req: AdversarialReviewRequest) -> dict[str, Any]:
+        try:
+            return adversarial_engine.run_review(
+                subject_key=req.subject_key,
+                conclusion_agent=req.conclusion_agent,
+                conclusion_summary=req.conclusion_summary,
+                proposer_evidence=req.proposer_evidence,
+                challenger_agent=req.challenger_agent,
+                arbiter_agent=req.arbiter_agent,
+                metrics=req.metrics,
+                opposing_evidence=req.opposing_evidence,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.get("/api/kalshi/markets")
     async def kalshi_markets(limit: int = Query(default=15, ge=1, le=40)) -> dict[str, Any]:

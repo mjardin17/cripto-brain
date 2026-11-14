@@ -16,9 +16,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from backend.intelligence.agents import (
     AGENT_PROFILES,
@@ -59,6 +60,7 @@ class SupervisorOrchestrator:
         learning: LearningEngine,
         scanner: Any = None,
         cross_scanner: Any = None,
+        model_router: Any = None,
     ) -> None:
         self.store = store
         self.risk_gate = risk_gate
@@ -66,7 +68,30 @@ class SupervisorOrchestrator:
         self.learning = learning
         self.scanner = scanner
         self.cross_scanner = cross_scanner
+        self.model_router = model_router
         self.blocker_engine = BlockerRecoveryEngine(store=store, memory=memory, learning=learning)
+
+        # Stage 3D/3E: Lifecycle-managed background Supervisor loop state & uptime telemetry
+        self._loop_task: asyncio.Task[Any] | None = None
+        self._stop_event: asyncio.Event | None = None
+        self._started_mono: float | None = None
+        self._cumulative_uptime_sec: float = 0.0
+        self._on_tick_hooks: list[Callable[[], Any]] = []
+        self._loop_state: dict[str, Any] = {
+            "running": False,
+            "interval_seconds": 5.0,
+            "started_at": None,
+            "stopped_at": None,
+            "uptime_seconds": 0.0,
+            "ticks": 0,
+            "last_tick_at": None,
+            "last_error": None,
+            "critical_failures_count": 0,
+            "startup_recovered_count": 0,
+            "shutdown_recovered_count": 0,
+            "duplicate_starts_blocked": 0,
+            "halted_by_kill_switch": False,
+        }
 
         # Ensure supervisor policy persisted across restarts
         policy = self.store.get_state("supervisor_policy")
@@ -1042,6 +1067,13 @@ class SupervisorOrchestrator:
             token = leased_task["lease_token"]
             try:
                 running_task = self.start_task(t_id, worker_id=w_id, lease_token=token)
+                if self.model_router is not None:
+                    self.model_router.route_task(
+                        task_id=t_id,
+                        agent_id=str(running_task.get("assigned_agent") or w.get("agent_role")),
+                        task_category=str(running_task.get("task_type") or "MARKET_SCAN"),
+                        prefer_ai=bool((running_task.get("payload") or {}).get("prefer_ai", False)),
+                    )
                 timeout = float(running_task.get("timeout_seconds") or 30.0)
                 output = await asyncio.wait_for(execute_agent_task(running_task, ctx), timeout=timeout)
                 done = self.complete_task(t_id, worker_id=w_id, lease_token=token, result=output)
@@ -1091,6 +1123,215 @@ class SupervisorOrchestrator:
             "outcomes": outcomes,
         }
 
+    # ------------------------------------------------------------------
+    # Stage 3D Priority Zero: Lifecycle-Managed Background Supervisor Loop
+    # ------------------------------------------------------------------
+    def register_tick_hook(self, hook: Callable[[], Any]) -> None:
+        if hook not in self._on_tick_hooks:
+            self._on_tick_hooks.append(hook)
+
+    def _safe_record_critical_event(self, event_type: str, message: str, detail: dict[str, Any] | None = None) -> None:
+        self._loop_state["critical_failures_count"] = int(self._loop_state.get("critical_failures_count", 0)) + 1
+        try:
+            self.store.record_system_event(
+                severity="CRITICAL",
+                component="supervisor",
+                event_type=event_type,
+                message=message,
+                detail=detail or {},
+            )
+        except Exception:
+            pass
+
+    def get_background_loop_state(self) -> dict[str, Any]:
+        is_running = bool(self._loop_task is not None and not self._loop_task.done())
+        kill_active = self.store.is_kill_switch_active()
+        live_uptime = self._cumulative_uptime_sec
+        if is_running and self._started_mono is not None:
+            live_uptime += max(0.0, time.monotonic() - self._started_mono)
+        return {
+            **self._loop_state,
+            "running": is_running,
+            "uptime_seconds": round(live_uptime, 2),
+            "halted_by_kill_switch": kill_active,
+        }
+
+    async def start_background_loop(
+        self,
+        *,
+        interval_seconds: float = 5.0,
+        max_tasks_per_tick: int = 4,
+    ) -> dict[str, Any]:
+        """Start bounded background Supervisor loop, preventing duplicates and recovering expired leases."""
+        if self._loop_task is not None and not self._loop_task.done():
+            self._loop_state["duplicate_starts_blocked"] = int(
+                self._loop_state.get("duplicate_starts_blocked", 0)
+            ) + 1
+            self.log_activity(
+                actor="supervisor",
+                agent_role="SUPERVISOR",
+                event_type="DUPLICATE_LOOP_PREVENTED",
+                summary="Prevented duplicate background Supervisor loop startup",
+                detail={"duplicate_starts_blocked": self._loop_state["duplicate_starts_blocked"]},
+            )
+            return {
+                "started": False,
+                "duplicate_prevented": True,
+                "state": self.get_background_loop_state(),
+            }
+
+        interval = max(0.05, min(60.0, float(interval_seconds)))
+        per_tick = max(1, min(self.get_policy()["max_concurrency"], int(max_tasks_per_tick)))
+
+        # Recover any expired leases left over from prior shutdown or crash
+        startup_reaped = self.reap_stale_tasks()
+        self._stop_event = asyncio.Event()
+        self._started_mono = time.monotonic()
+        self._loop_state.update(
+            {
+                "running": True,
+                "interval_seconds": interval,
+                "started_at": utc_now_iso(),
+                "stopped_at": None,
+                "last_error": None,
+                "startup_recovered_count": len(startup_reaped),
+                "halted_by_kill_switch": self.store.is_kill_switch_active(),
+            }
+        )
+
+        async def _runner() -> None:
+            assert self._stop_event is not None
+            try:
+                while not self._stop_event.is_set():
+                    try:
+                        kill_active = self.store.is_kill_switch_active()
+                        self._loop_state["halted_by_kill_switch"] = kill_active
+                        self._loop_state["ticks"] = int(self._loop_state.get("ticks", 0)) + 1
+                        self._loop_state["last_tick_at"] = utc_now_iso()
+                        if kill_active:
+                            self.scale_workers(0)
+                        else:
+                            await self.dispatch_cycle(max_tasks=per_tick)
+                        for hook in list(self._on_tick_hooks):
+                            res = hook()
+                            if asyncio.iscoroutine(res):
+                                await res
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        self._loop_state["last_error"] = str(exc)
+                        self._safe_record_critical_event(
+                            "SUPERVISOR_TICK_FAILURE",
+                            f"Background Supervisor loop tick error: {exc}",
+                            {"tick": self._loop_state.get("ticks", 0), "error": str(exc)},
+                        )
+                        try:
+                            self.log_activity(
+                                actor="supervisor",
+                                agent_role="SUPERVISOR",
+                                event_type="BACKGROUND_LOOP_TICK_ERROR",
+                                summary=f"Background loop tick handled error cleanly: {exc}",
+                            )
+                        except Exception:
+                            pass
+
+                    try:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                    except asyncio.TimeoutError:
+                        continue
+            except asyncio.CancelledError:
+                pass
+            except Exception as fatal_exc:
+                self._loop_state["last_error"] = str(fatal_exc)
+                self._safe_record_critical_event(
+                    "SUPERVISOR_LOOP_CRASH",
+                    f"Supervisor background loop terminated unexpectedly: {fatal_exc}",
+                    {"error": str(fatal_exc)},
+                )
+            finally:
+                if self._started_mono is not None:
+                    self._cumulative_uptime_sec += max(0.0, time.monotonic() - self._started_mono)
+                    self._started_mono = None
+                self._loop_state["uptime_seconds"] = round(self._cumulative_uptime_sec, 2)
+                self._loop_state["running"] = False
+
+        self._loop_task = asyncio.create_task(_runner(), name="certainty-supervisor-loop")
+        self.log_activity(
+            actor="supervisor",
+            agent_role="SUPERVISOR",
+            event_type="BACKGROUND_LOOP_STARTED",
+            summary=f"Started background Supervisor loop (interval={interval}s, startup_reaped={len(startup_reaped)})",
+            detail={"interval_seconds": interval, "startup_recovered_count": len(startup_reaped)},
+        )
+        return {
+            "started": True,
+            "duplicate_prevented": False,
+            "startup_recovered_count": len(startup_reaped),
+            "state": self.get_background_loop_state(),
+        }
+
+    async def stop_background_loop(self, grace_seconds: float = 3.0) -> dict[str, Any]:
+        """Gracefully stop background Supervisor loop, stop idle workers, and recover active tasks."""
+        if self._stop_event is not None:
+            self._stop_event.set()
+
+        if self._loop_task is not None and not self._loop_task.done():
+            try:
+                await asyncio.wait_for(self._loop_task, timeout=max(0.2, float(grace_seconds)))
+            except asyncio.TimeoutError:
+                self._loop_task.cancel()
+                try:
+                    await self._loop_task
+                except asyncio.CancelledError:
+                    pass
+            except asyncio.CancelledError:
+                pass
+
+        if self._started_mono is not None:
+            self._cumulative_uptime_sec += max(0.0, time.monotonic() - self._started_mono)
+            self._started_mono = None
+
+        # Recover any active tasks that remain LEASED/RUNNING cleanly back to QUEUED or ESCALATED
+        recovered_count = 0
+        with self.store._lock:
+            rows = self.store._conn.execute(
+                "SELECT * FROM agent_tasks WHERE status IN ('LEASED', 'RUNNING')"
+            ).fetchall()
+            cols = [d[0] for d in self.store._conn.description]
+            stranded = [self._row_to_task(cols, r) for r in rows]
+            for task in stranded:
+                self.fail_or_recover_task(
+                    task["task_id"],
+                    error_message="Graceful supervisor shutdown reclaimed active task lease",
+                    explicit_class="WORKER_LEASE_EXPIRED",
+                    is_supervisor=True,
+                )
+                recovered_count += 1
+
+            # Stop all remaining IDLE/UNHEALTHY workers cleanly
+            now_str = utc_now_iso()
+            self.store._conn.execute(
+                "UPDATE worker_registry SET status = 'STOPPED', current_task_id = NULL, updated_at = ? WHERE status != 'STOPPED'",
+                [now_str],
+            )
+
+        self._loop_state["running"] = False
+        self._loop_state["stopped_at"] = utc_now_iso()
+        self._loop_state["uptime_seconds"] = round(self._cumulative_uptime_sec, 2)
+        self._loop_state["shutdown_recovered_count"] = recovered_count
+        self.log_activity(
+            actor="supervisor",
+            agent_role="SUPERVISOR",
+            event_type="BACKGROUND_LOOP_STOPPED",
+            summary=f"Gracefully stopped background Supervisor loop (recovered_tasks={recovered_count})",
+            detail={"shutdown_recovered_count": recovered_count},
+        )
+        return {
+            "stopped": True,
+            "shutdown_recovered_count": recovered_count,
+            "state": self.get_background_loop_state(),
+        }
+
     def get_status_snapshot(self) -> dict[str, Any]:
         pol = self.get_policy()
         kill_active = self.store.is_kill_switch_active()
@@ -1101,10 +1342,11 @@ class SupervisorOrchestrator:
             counts_by_status = {str(s): int(c) for s, c in rows}
         workers = self.list_workers(include_stopped=False)
         return {
-            "phase": "Phase 3 — Stage 3C Multi-Agent Orchestration",
+            "phase": "Phase 3 — Stage 3D Intelligence, Self-Testing & Agent Orchestration",
             "live_trading_enabled": False,
             "kill_switch_active": kill_active,
             "dispatch_status": "HALTED_BY_KILL_SWITCH" if kill_active else "ACTIVE_RESEARCH_ONLY",
+            "background_loop": self.get_background_loop_state(),
             "policy": pol,
             "agents": [
                 {

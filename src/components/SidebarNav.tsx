@@ -1,6 +1,12 @@
-import { Activity, ArrowLeftRight, BookOpen, Layers, ShieldAlert } from 'lucide-react';
+import { Activity, ArrowLeftRight, BookOpen, BrainCircuit, Layers, ShieldAlert } from 'lucide-react';
 
-export type WorkspaceTab = 'command' | 'scanner' | 'cross_venue' | 'risk' | 'architecture';
+export type WorkspaceTab =
+  | 'command'
+  | 'scanner'
+  | 'cross_venue'
+  | 'intelligence'
+  | 'risk'
+  | 'architecture';
 
 interface SidebarNavProps {
   activeTab: WorkspaceTab;
@@ -35,6 +41,12 @@ const NAV_ITEMS: Array<{
     Icon: ArrowLeftRight,
   },
   {
+    id: 'intelligence',
+    label: 'Intelligence & Agents',
+    subtitle: 'Supervisor, calibration & routing',
+    Icon: BrainCircuit,
+  },
+  {
     id: 'risk',
     label: 'Risk Gate & Audit',
     subtitle: 'Fail-closed policy & kill switch',
@@ -64,7 +76,7 @@ export function SidebarNav({
               The Certainty Stack
             </div>
             <div className="mt-0.5 lg:mt-1 text-xs text-slate-400">
-              Phase 2 · Read-Only + Paper Sim
+              Phase 3 · Research + Paper Sim
             </div>
           </div>
           <span

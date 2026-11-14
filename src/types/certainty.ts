@@ -1,4 +1,11 @@
-export type DataProvenance = 'LIVE' | 'SIMULATED' | 'UNAVAILABLE' | 'LIVE_SNAPSHOT';
+export type DataProvenance =
+  | 'LIVE'
+  | 'SIMULATED'
+  | 'HISTORICAL'
+  | 'SHORT_VALIDATION'
+  | 'SOAK_TEST'
+  | 'UNAVAILABLE'
+  | 'LIVE_SNAPSHOT';
 
 export interface VenueExposure {
   venue: string;
@@ -565,3 +572,539 @@ export interface PaperExecuteResponse {
   pnl_entry: PaperPnlLedgerRecord | null;
   summary: PaperSummary;
 }
+
+// ----------------------------------------------------------------------
+// Stage 3D: Agent Orchestration, Probability Intelligence & Routing
+// ----------------------------------------------------------------------
+
+export interface BackgroundLoopState {
+  running: boolean;
+  interval_seconds: number;
+  started_at: string | null;
+  stopped_at: string | null;
+  ticks: number;
+  last_tick_at: string | null;
+  last_error: string | null;
+  startup_recovered_count: number;
+  shutdown_recovered_count: number;
+  duplicate_starts_blocked: number;
+  halted_by_kill_switch: boolean;
+}
+
+export interface AgentProfileInfo {
+  role: string;
+  agent_id: string;
+  description: string;
+  permitted_actions: string[];
+  forbidden_actions: string[];
+  supports_task_types: string[];
+}
+
+export interface WorkerRecord {
+  worker_id: string;
+  agent_role: string;
+  status: 'IDLE' | 'BUSY' | 'UNHEALTHY' | 'STOPPED';
+  current_task_id: string | null;
+  permitted_actions: string[];
+  last_heartbeat_at: string;
+  tasks_completed: number;
+  tasks_failed: number;
+  spawned_at: string;
+  updated_at: string;
+}
+
+export interface AgentTaskRecord {
+  task_id: string;
+  dedup_key: string;
+  task_type: string;
+  assigned_agent: string;
+  status:
+    | 'PENDING'
+    | 'QUEUED'
+    | 'LEASED'
+    | 'RUNNING'
+    | 'BLOCKED'
+    | 'COMPLETED'
+    | 'FAILED'
+    | 'ESCALATED'
+    | 'CANCELLED';
+  priority: number;
+  payload: Record<string, unknown>;
+  result: Record<string, unknown>;
+  depends_on: string[];
+  worker_id: string | null;
+  lease_token: string | null;
+  lease_expires_at: string | null;
+  last_heartbeat_at: string | null;
+  timeout_seconds: number;
+  started_at: string | null;
+  attempt_count: number;
+  max_retries: number;
+  recovery_attempts: number;
+  max_recovery_attempts: number;
+  last_blocker_id: string | null;
+  escalation_reason: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BlockerEventRecord {
+  blocker_id: string;
+  task_id: string;
+  agent_id: string;
+  worker_id: string | null;
+  blocker_class: string;
+  error_message: string;
+  memory_hits: Array<Record<string, unknown>>;
+  candidate_strategies: Array<{
+    strategy: string;
+    allowed: boolean;
+    rejection_reason?: string | null;
+  }>;
+  selected_strategy: string | null;
+  recovery_action: string | null;
+  verification_detail: string | null;
+  outcome: string;
+  learning_cycle_id: string | null;
+  regression_case_id: string | null;
+  created_at: string;
+}
+
+export interface AgentActivityRecord {
+  activity_id: string;
+  actor: string;
+  agent_role: string;
+  task_id: string | null;
+  worker_id: string | null;
+  event_type: string;
+  summary: string;
+  detail: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface SupervisorStatusPayload {
+  phase: string;
+  live_trading_enabled: boolean;
+  kill_switch_active: boolean;
+  dispatch_status: string;
+  background_loop: BackgroundLoopState;
+  policy: {
+    max_concurrency: number;
+    hard_max_concurrency: number;
+    max_recovery_attempts: number;
+    max_retries: number;
+    lease_seconds: number;
+    heartbeat_grace_seconds: number;
+  };
+  agents: AgentProfileInfo[];
+  active_workers: WorkerRecord[];
+  active_workers_count: number;
+  task_counts_by_status: Record<string, number>;
+  recent_blockers: BlockerEventRecord[];
+  recent_activity: AgentActivityRecord[];
+}
+
+export interface CalibrationBucket {
+  bucket_index: number;
+  range_label: string;
+  low: number;
+  high: number;
+  count: number;
+  avg_predicted_prob: number | null;
+  empirical_yes_rate: number | null;
+  calibration_gap: number | null;
+}
+
+export interface CalibrationSummary {
+  resolved_count: number;
+  open_count: number;
+  voided_count: number;
+  mean_brier_score: number | null;
+  mean_log_loss: number | null;
+  accuracy_pct: number | null;
+  expected_calibration_error: number | null;
+  buckets: CalibrationBucket[];
+  note: string;
+}
+
+export interface AgentScorecard {
+  agent_id: string;
+  resolved_predictions: number;
+  open_predictions: number;
+  voided_predictions: number;
+  mean_brier_score: number | null;
+  mean_log_loss: number | null;
+  accuracy_pct: number | null;
+  expected_calibration_error: number | null;
+  comparison_eligible: boolean;
+  comparison_status: string;
+  min_resolved_samples_required: number;
+  rank: number | null;
+  tasks_completed: number;
+  tasks_escalated: number;
+  tasks_total: number;
+}
+
+export interface ScorecardsPayload {
+  min_resolved_samples_required: number;
+  comparable_agents_count: number;
+  scorecards: AgentScorecard[];
+}
+
+export interface PredictionRecord {
+  prediction_id: string;
+  agent_id: string;
+  market_id: string;
+  venue: string;
+  subject_key: string;
+  question: string;
+  predicted_prob: number;
+  market_implied_prob: number | null;
+  confidence: number;
+  rationale: string;
+  evidence: Array<Record<string, unknown>>;
+  provenance: DataProvenance;
+  status: 'OPEN' | 'RESOLVED' | 'VOIDED';
+  actual_outcome: number | null;
+  brier_score: number | null;
+  log_loss: number | null;
+  learning_cycle_id: string | null;
+  created_at: string;
+  resolved_at: string | null;
+  market_category?: string;
+}
+
+export interface ModelRoutingEvent {
+  routing_id: string;
+  task_id: string | null;
+  agent_id: string;
+  task_category: string;
+  selected_tier: 'DETERMINISTIC' | 'ECONOMICAL_AI' | 'UNAVAILABLE' | 'BLOCKED_BUDGET';
+  provider: string;
+  model_name: string;
+  api_key_configured: boolean;
+  estimated_cost_usd: number;
+  actual_cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  reason: string;
+  status: string;
+  created_at: string;
+}
+
+export interface ModelRoutingSummary {
+  provider: string;
+  provider_status: 'AVAILABLE' | 'UNAVAILABLE';
+  provenance: DataProvenance;
+  api_key_configured: boolean;
+  api_key_exposed_to_frontend: boolean;
+  policy: {
+    per_task_limit_usd: number;
+    daily_budget_usd: number;
+    deterministic_first: boolean;
+    economical_model: string;
+  };
+  daily_spent_usd: number;
+  remaining_daily_budget_usd: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  tier_breakdown: Record<
+    string,
+    {
+      count: number;
+      input_tokens: number;
+      output_tokens: number;
+      cost_usd: number;
+    }
+  >;
+  recent_events: ModelRoutingEvent[];
+}
+
+export interface ConfigVersionRecord {
+  config_version_id: string;
+  config_domain: string;
+  version: number;
+  config: Record<string, unknown>;
+  status: 'ACTIVE' | 'CANDIDATE' | 'ROLLED_BACK';
+  proposed_by: string;
+  reviewed_by: string | null;
+  source_cycle_id: string | null;
+  regression_case_id: string | null;
+  regression_passed: boolean;
+  change_reason: string;
+  created_at: string;
+  activated_at: string | null;
+}
+
+export interface LearningCycleRecord {
+  cycle_id: string;
+  stage: string;
+  source_type: string;
+  source_ref_id: string;
+  agent_id: string;
+  subject_key: string;
+  hypothesis: string;
+  decision_summary: string;
+  outcome_matched: boolean | null;
+  regression_case_id: string | null;
+  applied_flag: boolean;
+  updated_at: string;
+}
+
+export interface RegressionCaseRecord {
+  case_id: string;
+  category: string;
+  title: string;
+  status: string;
+  last_run_status: string | null;
+  last_run_detail: string | null;
+  created_at: string;
+}
+
+export interface OperationalHealthReport {
+  provenance: DataProvenance;
+  health_status: 'NOMINAL' | 'DEGRADED' | 'HALTED_BY_KILL_SWITCH';
+  supervisor_running: boolean;
+  supervisor_uptime_seconds: number;
+  supervisor_ticks: number;
+  critical_failures_count: number;
+  last_supervisor_error: string | null;
+  active_workers_count: number;
+  unhealthy_workers_count: number;
+  stalled_workers_count: number;
+  stalled_workers: Array<Record<string, unknown>>;
+  worker_uptime_avg_seconds: number;
+  tasks_queued: number;
+  tasks_active: number;
+  tasks_completed: number;
+  tasks_failed: number;
+  tasks_escalated: number;
+  tasks_blocked: number;
+  abandoned_tasks_count: number;
+  abandoned_tasks: Array<Record<string, unknown>>;
+  long_running_tasks_count: number;
+  long_running_tasks: Array<Record<string, unknown>>;
+  expired_leases_active_count: number;
+  expired_leases_historical_count: number;
+  avg_task_duration_ms: number;
+  recovery_attempts_total: number;
+  recovery_successes: number;
+  recovery_escalations: number;
+  recovery_success_rate_pct: number;
+  critical_events_count: number;
+  warning_events_count: number;
+  memory_rss_mb: number;
+  api_spend_today_usd: number;
+  checked_at: string;
+}
+
+export interface SystemEventRecord {
+  event_id: string;
+  severity: string;
+  component: string;
+  event_type: string;
+  message: string;
+  detail: Record<string, unknown>;
+  acknowledged: boolean;
+  created_at: string;
+}
+
+export type SoakMode = 'SHORT_VALIDATION' | 'SOAK_24H' | 'SOAK_48H' | 'SOAK_72H';
+
+export interface SoakRunRecord {
+  run_id: string;
+  mode: SoakMode;
+  run_label: 'SOAK_TEST' | 'SHORT_VALIDATION';
+  status: 'RUNNING' | 'PASSED' | 'FAILED' | 'STOPPED_EARLY' | 'UNEXPECTED_SHUTDOWN';
+  duration_target_seconds: number;
+  tick_interval_seconds: number;
+  started_at: string;
+  ends_at: string;
+  ended_at: string | null;
+  elapsed_seconds: number;
+  progress_pct: number;
+  supervisor_uptime_seconds: number;
+  tasks_submitted: number;
+  tasks_completed: number;
+  tasks_failed: number;
+  worker_failures: number;
+  recovery_events: number;
+  db_errors: number;
+  memory_rss_mb: number | null;
+  api_spend_usd: number;
+  unexpected_shutdowns: number;
+  kill_switch_events: number;
+  failure_reason: string | null;
+  metrics: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConcurrencyStressRunRecord {
+  stress_id: string;
+  status: 'PASSED' | 'FAILED';
+  config: Record<string, unknown>;
+  total_claims_attempted: number;
+  successful_claims: number;
+  rejected_duplicates: number;
+  ownership_violations: number;
+  recovery_successes: number;
+  deadlocks_detected: number;
+  starved_tasks: number;
+  avg_queue_latency_ms: number;
+  throughput_tasks_per_sec: number;
+  kill_switch_halted: boolean;
+  db_contention_retries: number;
+  summary: Record<string, unknown>;
+  started_at: string;
+  ended_at: string;
+}
+
+export interface HistoricalValidationReport {
+  provenance: DataProvenance;
+  resolved_count: number;
+  open_excluded_count: number;
+  voided_excluded_count: number;
+  min_resolved_samples_required: number;
+  comparative_claim_allowed: boolean;
+  comparative_verdict: string;
+  agent_metrics: {
+    mean_brier_score: number | null;
+    brier_ci_95: [number, number] | null;
+    mean_log_loss: number | null;
+    log_loss_ci_95: [number, number] | null;
+    expected_calibration_error: number | null;
+    directional_accuracy_pct: number | null;
+    accuracy_wilson_ci_95_pct: [number, number] | null;
+  };
+  baselines: {
+    base_rate_prob: number | null;
+    base_rate_brier_score: number | null;
+    base_rate_log_loss: number | null;
+    base_rate_accuracy_pct: number | null;
+    market_implied_sample_size: number;
+    market_implied_brier_score: number | null;
+    market_implied_log_loss: number | null;
+    market_implied_accuracy_pct: number | null;
+    agent_brier_on_market_subset: number | null;
+    paired_brier_diff_mean?: number | null;
+    paired_brier_diff_ci_95: [number, number] | null;
+    brier_skill_vs_market: number | null;
+  };
+  by_category: Array<{
+    market_category: string;
+    resolved_count: number;
+    mean_brier_score: number;
+    mean_log_loss: number;
+    accuracy_pct: number;
+  }>;
+  by_agent: Array<{
+    agent_id: string;
+    resolved_count: number;
+    mean_brier_score: number;
+    mean_log_loss: number;
+    accuracy_pct: number;
+    comparative_eligible: boolean;
+  }>;
+  note: string;
+}
+
+export interface ResearchValidationRecord {
+  validation_id: string;
+  agent_id: string;
+  source_identifier: string;
+  source_timestamp: string | null;
+  retrieval_timestamp: string;
+  evidence_summary: string;
+  verification_status: string;
+  freshness_ok: boolean;
+  conflict_detected: boolean;
+  duplicate_market_detected: boolean;
+  injection_detected: boolean;
+  contract_equivalence_ok: boolean;
+  confidence: number;
+  payload: Record<string, unknown>;
+  findings: string[];
+  created_at: string;
+}
+
+export interface AdversarialReviewRecord {
+  review_id: string;
+  subject_key: string;
+  conclusion_agent: string;
+  conclusion_summary: string;
+  proposer_evidence: Array<Record<string, unknown>>;
+  challenger_agent: string;
+  challenge_notes: string;
+  opposing_evidence: Array<Record<string, unknown>>;
+  arbiter_agent: string;
+  verdict: 'VERIFIED' | 'DISPROVED' | 'UNVERIFIED';
+  checks: Array<{
+    check_id: string;
+    failed: boolean;
+    detail: string;
+  }>;
+  learning_cycle_id: string | null;
+  created_at: string;
+  resolved_at: string;
+}
+
+export interface PaperStressRunRecord {
+  stress_id: string;
+  scenario_name: string;
+  pair_id: string;
+  status: string;
+  proven_simulated: boolean;
+  risk_gate_approved: boolean;
+  expected_edge_pct: number | null;
+  realized_simulated_edge_pct: number | null;
+  simulated_pnl_usd: number;
+  fees_usd: number;
+  slippage_usd: number;
+  fill_rate_pct: number;
+  latency_ms: number;
+  unwind_loss_usd: number;
+  rejection_reason: string | null;
+  learning_cycle_id: string | null;
+  metrics: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface PaperStressSuiteResponse {
+  provenance: DataProvenance;
+  live_trading_enabled: boolean;
+  scenarios_executed: number;
+  approved_count: number;
+  rejected_count: number;
+  risk_gate_rejection_rate_pct: number;
+  total_simulated_pnl_usd: number;
+  total_unwind_loss_usd: number;
+  results: PaperStressRunRecord[];
+}
+
+export interface IntelligenceCommandCenterPayload {
+  phase: string;
+  live_trading_enabled: boolean;
+  supervisor: SupervisorStatusPayload;
+  tasks: AgentTaskRecord[];
+  blockers: BlockerEventRecord[];
+  calibration: CalibrationSummary;
+  scorecards: ScorecardsPayload;
+  predictions: PredictionRecord[];
+  model_routing: ModelRoutingSummary;
+  configs: ConfigVersionRecord[];
+  memory_counts: Record<string, number>;
+  learning_cycles: LearningCycleRecord[];
+  regression_cases: RegressionCaseRecord[];
+  operational_health: OperationalHealthReport;
+  system_events: SystemEventRecord[];
+  soak_runs: SoakRunRecord[];
+  concurrency_stress_runs: ConcurrencyStressRunRecord[];
+  historical_validation: HistoricalValidationReport;
+  research_validations: ResearchValidationRecord[];
+  adversarial_reviews: AdversarialReviewRecord[];
+  paper_stress_runs: PaperStressRunRecord[];
+  generated_at: string;
+}
+

@@ -82,6 +82,21 @@ export function describeProvenance(provenance: DataProvenance): {
         label: 'SIMULATED',
         toneClass: 'text-amber-400',
       };
+    case 'HISTORICAL':
+      return {
+        label: 'HISTORICAL',
+        toneClass: 'text-violet-300',
+      };
+    case 'SHORT_VALIDATION':
+      return {
+        label: 'SHORT VALIDATION',
+        toneClass: 'text-cyan-300',
+      };
+    case 'SOAK_TEST':
+      return {
+        label: 'SOAK TEST',
+        toneClass: 'text-emerald-300',
+      };
     case 'UNAVAILABLE':
     default:
       return {
@@ -164,3 +179,96 @@ export function summarizeExecutionOutcome(status: string): {
       return { label: status, toneClass: 'text-slate-300' };
   }
 }
+
+export function formatScoreMetric(value: number | null | undefined, decimals = 4): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return '—';
+  }
+  return value.toFixed(decimals);
+}
+
+export function formatProbPct(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return '—';
+  }
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+export function summarizeAgentTaskStatus(status: string): {
+  label: string;
+  toneClass: string;
+} {
+  switch (status) {
+    case 'COMPLETED':
+      return { label: 'COMPLETED', toneClass: 'text-emerald-400' };
+    case 'RUNNING':
+    case 'LEASED':
+      return { label: status, toneClass: 'text-sky-400' };
+    case 'QUEUED':
+    case 'PENDING':
+      return { label: status, toneClass: 'text-slate-300' };
+    case 'BLOCKED':
+      return { label: 'BLOCKED', toneClass: 'text-amber-400' };
+    case 'ESCALATED':
+    case 'FAILED':
+    case 'CANCELLED':
+      return { label: status, toneClass: 'text-rose-400' };
+    default:
+      return { label: status, toneClass: 'text-slate-300' };
+  }
+}
+
+export function computeBudgetUtilizationPct(spentUsd: number, dailyCapUsd: number): number {
+  if (!Number.isFinite(spentUsd) || !Number.isFinite(dailyCapUsd) || dailyCapUsd <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, (spentUsd / dailyCapUsd) * 100));
+}
+
+export function formatDurationSeconds(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) {
+    return '—';
+  }
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  }
+  const totalSec = Math.floor(seconds);
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const remSec = totalSec % 60;
+  if (hrs > 0) {
+    return `${hrs}h ${String(mins).padStart(2, '0')}m ${String(remSec).padStart(2, '0')}s`;
+  }
+  return `${mins}m ${String(remSec).padStart(2, '0')}s`;
+}
+
+export function summarizeValidationStatus(status: string): {
+  label: string;
+  toneClass: string;
+} {
+  switch (status) {
+    case 'VERIFIED':
+    case 'PASSED':
+    case 'NOMINAL':
+      return { label: status, toneClass: 'text-emerald-400' };
+    case 'RUNNING':
+      return { label: status, toneClass: 'text-sky-400' };
+    case 'STOPPED_EARLY':
+    case 'UNCERTAIN_INSUFFICIENT_EVIDENCE':
+    case 'UNVERIFIED':
+    case 'DEGRADED':
+      return { label: status, toneClass: 'text-amber-400' };
+    case 'REJECTED_INJECTION':
+    case 'DISPROVED':
+    case 'STALE_DATA':
+    case 'CONFLICTING_EVIDENCE':
+    case 'CONTRACT_MISMATCH_BLOCKED':
+    case 'UNEXPECTED_SHUTDOWN':
+    case 'FAILED':
+    case 'CRITICAL':
+      return { label: status, toneClass: 'text-rose-400' };
+    default:
+      return { label: status, toneClass: 'text-slate-300' };
+  }
+}
+

@@ -1,21 +1,35 @@
 import type {
+  AdversarialReviewRecord,
   AgentMemoryEntry,
+  AgentTaskRecord,
+  ConcurrencyStressRunRecord,
+  ConfigVersionRecord,
   CrossVenueOpportunityRecord,
   CrossVenuePairRecord,
   CrossVenuePairRegisterResponse,
   CrossVenueScanResponse,
   DashboardPayload,
   HealthPayload,
+  HistoricalValidationReport,
+  IntelligenceCommandCenterPayload,
   KalshiBookSnapshotResponse,
   KalshiMarketsListResponse,
   KillSwitchState,
   MarketBookSnapshotResponse,
+  ModelRoutingEvent,
+  OperationalHealthReport,
   PaperBlotterResponse,
   PaperExecuteResponse,
   PaperExecutionScenario,
+  PaperStressSuiteResponse,
+  PredictionRecord,
+  ResearchValidationRecord,
   RiskAuditEntry,
   RiskEvalResponse,
   ScanResponse,
+  SoakMode,
+  SoakRunRecord,
+  SystemEventRecord,
 } from '../types/certainty';
 import type { RiskDryRunFormState } from '../utils/formatters';
 
@@ -149,4 +163,173 @@ export const certaintyApi = {
 
   getPaperBlotter: (limit = 100) =>
     apiFetch<PaperBlotterResponse>(`/api/paper/blotter?limit=${limit}`),
+
+  // Stage 3D: Intelligence & Agent Command Center
+  getIntelligenceCommandCenter: () =>
+    apiFetch<IntelligenceCommandCenterPayload>('/api/intelligence/command-center'),
+
+  startAgentLoop: (payload?: { interval_seconds?: number; max_tasks_per_tick?: number }) =>
+    apiFetch<{ started: boolean; duplicate_prevented: boolean }>('/api/agents/loop/start', {
+      method: 'POST',
+      body: JSON.stringify(payload ?? { interval_seconds: 5.0, max_tasks_per_tick: 4 }),
+    }),
+
+  stopAgentLoop: () =>
+    apiFetch<{ stopped: boolean; shutdown_recovered_count: number }>('/api/agents/loop/stop', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  dispatchAgentTasks: (maxTasks = 4) =>
+    apiFetch<{ halted: boolean; dispatched_count: number; completed_count: number }>(
+      '/api/agents/dispatch',
+      {
+        method: 'POST',
+        body: JSON.stringify({ max_tasks: maxTasks }),
+      }
+    ),
+
+  scaleAgentWorkers: (payload: { max_concurrency?: number; target_concurrency?: number }) =>
+    apiFetch<Record<string, unknown>>('/api/agents/scale', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  submitAgentTask: (payload: {
+    task_type: string;
+    assigned_agent: string;
+    priority?: number;
+    dedup_key?: string;
+    payload?: Record<string, unknown>;
+  }) =>
+    apiFetch<{ created: boolean; duplicate_prevented: boolean; task: AgentTaskRecord }>(
+      '/api/agents/tasks',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  createPrediction: (payload: {
+    agent_id: string;
+    market_id: string;
+    venue: string;
+    subject_key: string;
+    question: string;
+    predicted_prob: number;
+    market_implied_prob?: number | null;
+    confidence?: number;
+    rationale?: string;
+    provenance?: string;
+  }) =>
+    apiFetch<PredictionRecord>('/api/intelligence/predictions', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  resolvePrediction: (
+    predictionId: string,
+    payload: { outcome: 0 | 1 | 'VOID'; resolution_source?: string }
+  ) =>
+    apiFetch<PredictionRecord>(
+      `/api/intelligence/predictions/${encodeURIComponent(predictionId)}/resolve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  routeModelRequest: (payload: {
+    agent_id: string;
+    task_category: string;
+    prefer_ai: boolean;
+    estimated_input_tokens?: number;
+    estimated_output_tokens?: number;
+  }) =>
+    apiFetch<ModelRoutingEvent>('/api/intelligence/model-routing/route', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  rollbackConfig: (payload: {
+    config_domain: string;
+    target_version: number;
+    actor?: string;
+    reason?: string;
+  }) =>
+    apiFetch<ConfigVersionRecord>('/api/intelligence/configs/rollback', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  // Stage 3E: Autonomous Operations & Validation Labs
+  getOperationsHealth: () =>
+    apiFetch<OperationalHealthReport>('/api/operations/health'),
+
+  getSystemEvents: (limit = 50) =>
+    apiFetch<{ count: number; items: SystemEventRecord[] }>(`/api/operations/events?limit=${limit}`),
+
+  startSoakRun: (payload: {
+    mode: SoakMode;
+    duration_seconds?: number;
+    tick_interval_seconds?: number;
+  }) =>
+    apiFetch<SoakRunRecord>('/api/operations/soak/start', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  stopSoakRun: (payload?: { run_id?: string; reason?: string }) =>
+    apiFetch<SoakRunRecord>('/api/operations/soak/stop', {
+      method: 'POST',
+      body: JSON.stringify(payload ?? {}),
+    }),
+
+  runConcurrencyStress: (payload?: { task_count?: number; worker_count?: number }) =>
+    apiFetch<ConcurrencyStressRunRecord>('/api/validation/concurrency-stress', {
+      method: 'POST',
+      body: JSON.stringify(payload ?? { task_count: 12, worker_count: 4 }),
+    }),
+
+  getHistoricalValidation: (minResolvedSamples = 10) =>
+    apiFetch<HistoricalValidationReport>(
+      `/api/validation/predictions/historical?min_resolved_samples=${minResolvedSamples}`
+    ),
+
+  validateResearchSubmission: (payload: {
+    agent_id: string;
+    source_identifier: string;
+    source_timestamp?: string | null;
+    retrieval_timestamp?: string | null;
+    evidence_summary: string;
+    market_id?: string;
+    market_question?: string;
+    raw_external_text?: string;
+    confidence?: number;
+    conflicting_claims?: Array<Record<string, unknown>>;
+  }) =>
+    apiFetch<ResearchValidationRecord>('/api/validation/research', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  runPaperStress: (payload?: { scenarios?: string[]; target_shares?: number }) =>
+    apiFetch<PaperStressSuiteResponse>('/api/validation/paper-stress', {
+      method: 'POST',
+      body: JSON.stringify(payload ?? { target_shares: 25 }),
+    }),
+
+  runAdversarialReview: (payload: {
+    subject_key: string;
+    conclusion_agent: string;
+    conclusion_summary: string;
+    proposer_evidence: Array<Record<string, unknown>>;
+    metrics?: Record<string, unknown>;
+    opposing_evidence?: Array<Record<string, unknown>>;
+  }) =>
+    apiFetch<AdversarialReviewRecord>('/api/validation/adversarial-review', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 };
+

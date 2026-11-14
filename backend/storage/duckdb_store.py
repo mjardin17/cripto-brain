@@ -454,6 +454,210 @@ class DuckDBStore:
                 )
                 """
             )
+            # Phase 3 Stage 3D additive intelligence, calibration, routing & config tables
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS predictions (
+                    prediction_id VARCHAR PRIMARY KEY,
+                    agent_id VARCHAR NOT NULL,
+                    market_id VARCHAR NOT NULL,
+                    venue VARCHAR NOT NULL,
+                    subject_key VARCHAR NOT NULL,
+                    question VARCHAR NOT NULL,
+                    predicted_prob DOUBLE NOT NULL,
+                    market_implied_prob DOUBLE,
+                    confidence DOUBLE NOT NULL,
+                    rationale VARCHAR NOT NULL,
+                    evidence_json VARCHAR NOT NULL,
+                    provenance VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    actual_outcome INTEGER,
+                    brier_score DOUBLE,
+                    log_loss DOUBLE,
+                    learning_cycle_id VARCHAR,
+                    created_at VARCHAR NOT NULL,
+                    resolved_at VARCHAR
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_versions (
+                    config_version_id VARCHAR PRIMARY KEY,
+                    config_domain VARCHAR NOT NULL,
+                    version INTEGER NOT NULL,
+                    config_json VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    proposed_by VARCHAR NOT NULL,
+                    reviewed_by VARCHAR,
+                    source_cycle_id VARCHAR,
+                    regression_case_id VARCHAR,
+                    regression_passed BOOLEAN NOT NULL,
+                    change_reason VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL,
+                    activated_at VARCHAR
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS model_routing_log (
+                    routing_id VARCHAR PRIMARY KEY,
+                    task_id VARCHAR,
+                    agent_id VARCHAR NOT NULL,
+                    task_category VARCHAR NOT NULL,
+                    selected_tier VARCHAR NOT NULL,
+                    provider VARCHAR NOT NULL,
+                    model_name VARCHAR NOT NULL,
+                    api_key_configured BOOLEAN NOT NULL,
+                    estimated_cost_usd DOUBLE NOT NULL,
+                    actual_cost_usd DOUBLE NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    reason VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            # Phase 3 Stage 3E additive migration & operational validation tables
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS market_category VARCHAR DEFAULT 'general'"
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS soak_runs (
+                    run_id VARCHAR PRIMARY KEY,
+                    mode VARCHAR NOT NULL,
+                    run_label VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    duration_target_seconds DOUBLE NOT NULL,
+                    tick_interval_seconds DOUBLE NOT NULL,
+                    started_at VARCHAR NOT NULL,
+                    ends_at VARCHAR NOT NULL,
+                    ended_at VARCHAR,
+                    elapsed_seconds DOUBLE NOT NULL,
+                    supervisor_uptime_seconds DOUBLE NOT NULL,
+                    tasks_submitted INTEGER NOT NULL,
+                    tasks_completed INTEGER NOT NULL,
+                    tasks_failed INTEGER NOT NULL,
+                    worker_failures INTEGER NOT NULL,
+                    recovery_events INTEGER NOT NULL,
+                    db_errors INTEGER NOT NULL,
+                    memory_rss_mb DOUBLE,
+                    api_spend_usd DOUBLE NOT NULL,
+                    unexpected_shutdowns INTEGER NOT NULL,
+                    kill_switch_events INTEGER NOT NULL,
+                    failure_reason VARCHAR,
+                    metrics_json VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL,
+                    updated_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS concurrency_stress_runs (
+                    stress_id VARCHAR PRIMARY KEY,
+                    status VARCHAR NOT NULL,
+                    config_json VARCHAR NOT NULL,
+                    total_claims_attempted INTEGER NOT NULL,
+                    successful_claims INTEGER NOT NULL,
+                    rejected_duplicates INTEGER NOT NULL,
+                    ownership_violations INTEGER NOT NULL,
+                    recovery_successes INTEGER NOT NULL,
+                    deadlocks_detected INTEGER NOT NULL,
+                    starved_tasks INTEGER NOT NULL,
+                    avg_queue_latency_ms DOUBLE NOT NULL,
+                    throughput_tasks_per_sec DOUBLE NOT NULL,
+                    kill_switch_halted BOOLEAN NOT NULL,
+                    db_contention_retries INTEGER NOT NULL,
+                    summary_json VARCHAR NOT NULL,
+                    started_at VARCHAR NOT NULL,
+                    ended_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS research_validations (
+                    validation_id VARCHAR PRIMARY KEY,
+                    agent_id VARCHAR NOT NULL,
+                    source_identifier VARCHAR NOT NULL,
+                    source_timestamp VARCHAR,
+                    retrieval_timestamp VARCHAR NOT NULL,
+                    evidence_summary VARCHAR NOT NULL,
+                    verification_status VARCHAR NOT NULL,
+                    freshness_ok BOOLEAN NOT NULL,
+                    conflict_detected BOOLEAN NOT NULL,
+                    duplicate_market_detected BOOLEAN NOT NULL,
+                    injection_detected BOOLEAN NOT NULL,
+                    contract_equivalence_ok BOOLEAN NOT NULL,
+                    confidence DOUBLE NOT NULL,
+                    payload_json VARCHAR NOT NULL,
+                    findings_json VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS adversarial_reviews (
+                    review_id VARCHAR PRIMARY KEY,
+                    subject_key VARCHAR NOT NULL,
+                    conclusion_agent VARCHAR NOT NULL,
+                    conclusion_summary VARCHAR NOT NULL,
+                    proposer_evidence_json VARCHAR NOT NULL,
+                    challenger_agent VARCHAR NOT NULL,
+                    challenge_notes VARCHAR NOT NULL,
+                    opposing_evidence_json VARCHAR NOT NULL,
+                    arbiter_agent VARCHAR NOT NULL,
+                    verdict VARCHAR NOT NULL,
+                    checks_json VARCHAR NOT NULL,
+                    learning_cycle_id VARCHAR,
+                    created_at VARCHAR NOT NULL,
+                    resolved_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_stress_runs (
+                    stress_id VARCHAR PRIMARY KEY,
+                    scenario_name VARCHAR NOT NULL,
+                    pair_id VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    proven_simulated BOOLEAN NOT NULL,
+                    risk_gate_approved BOOLEAN NOT NULL,
+                    expected_edge_pct DOUBLE,
+                    realized_simulated_edge_pct DOUBLE,
+                    simulated_pnl_usd DOUBLE NOT NULL,
+                    fees_usd DOUBLE NOT NULL,
+                    slippage_usd DOUBLE NOT NULL,
+                    fill_rate_pct DOUBLE NOT NULL,
+                    latency_ms DOUBLE NOT NULL,
+                    unwind_loss_usd DOUBLE NOT NULL,
+                    rejection_reason VARCHAR,
+                    learning_cycle_id VARCHAR,
+                    metrics_json VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS system_events (
+                    event_id VARCHAR PRIMARY KEY,
+                    severity VARCHAR NOT NULL,
+                    component VARCHAR NOT NULL,
+                    event_type VARCHAR NOT NULL,
+                    message VARCHAR NOT NULL,
+                    detail_json VARCHAR NOT NULL,
+                    acknowledged BOOLEAN NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
 
     def _seed_initial_memory_if_empty(self) -> None:
         with self._lock:
@@ -1205,6 +1409,64 @@ class DuckDBStore:
                 "total_unwound_shares": round(float(row[5] or 0.0), 4),
             }
 
+    def record_system_event(
+        self,
+        *,
+        severity: str,
+        component: str,
+        event_type: str,
+        message: str,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        evt_id = f"EVT-{uuid.uuid4().hex[:10].upper()}"
+        now_iso = utc_now_iso()
+        sev = severity.strip().upper()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO system_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    evt_id,
+                    sev,
+                    component.strip(),
+                    event_type.strip().upper(),
+                    message.strip()[:500],
+                    json.dumps(detail or {}),
+                    False,
+                    now_iso,
+                ],
+            )
+        return {
+            "event_id": evt_id,
+            "severity": sev,
+            "component": component.strip(),
+            "event_type": event_type.strip().upper(),
+            "message": message.strip()[:500],
+            "detail": detail or {},
+            "acknowledged": False,
+            "created_at": now_iso,
+        }
+
+    def list_system_events(
+        self, *, severity: str | None = None, limit: int = 80
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if severity:
+            clauses.append("severity = ?")
+            params.append(severity.strip().upper())
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM system_events {where_sql} ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                d = dict(zip(cols, r))
+                d["detail"] = json.loads(d.pop("detail_json", "{}"))
+                out.append(d)
+            return out
+
     def get_counts(self) -> dict[str, int]:
         with self._lock:
             snaps = self._conn.execute("SELECT COUNT(*) FROM market_snapshots").fetchone()[0]
@@ -1223,6 +1485,15 @@ class DuckDBStore:
                 "SELECT COUNT(*) FROM worker_registry WHERE status != 'STOPPED'"
             ).fetchone()[0]
             blockers = self._conn.execute("SELECT COUNT(*) FROM blocker_events").fetchone()[0]
+            preds = self._conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+            cfgvers = self._conn.execute("SELECT COUNT(*) FROM config_versions").fetchone()[0]
+            routing = self._conn.execute("SELECT COUNT(*) FROM model_routing_log").fetchone()[0]
+            soaks = self._conn.execute("SELECT COUNT(*) FROM soak_runs").fetchone()[0]
+            cstress = self._conn.execute("SELECT COUNT(*) FROM concurrency_stress_runs").fetchone()[0]
+            rvals = self._conn.execute("SELECT COUNT(*) FROM research_validations").fetchone()[0]
+            advrevs = self._conn.execute("SELECT COUNT(*) FROM adversarial_reviews").fetchone()[0]
+            pstress = self._conn.execute("SELECT COUNT(*) FROM paper_stress_runs").fetchone()[0]
+            sysevts = self._conn.execute("SELECT COUNT(*) FROM system_events").fetchone()[0]
             return {
                 "snapshots": int(snaps),
                 "opportunities": int(opps),
@@ -1238,6 +1509,15 @@ class DuckDBStore:
                 "agent_tasks": int(atasks),
                 "active_workers": int(workers),
                 "blocker_events": int(blockers),
+                "predictions": int(preds),
+                "config_versions": int(cfgvers),
+                "routing_events": int(routing),
+                "soak_runs": int(soaks),
+                "concurrency_stress_runs": int(cstress),
+                "research_validations": int(rvals),
+                "adversarial_reviews": int(advrevs),
+                "paper_stress_runs": int(pstress),
+                "system_events": int(sysevts),
             }
 
     def close(self) -> None:

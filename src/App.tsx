@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { certaintyApi } from './api/client';
 import { CommandCenterView } from './components/CommandCenterView';
 import { CrossVenuePaperView } from './components/CrossVenuePaperView';
+import { IntelligenceCenterView } from './components/IntelligenceCenterView';
 import { MemoryArchitectureView } from './components/MemoryArchitectureView';
 import { RiskGateAuditView } from './components/RiskGateAuditView';
 import { ScannerView } from './components/ScannerView';
@@ -12,6 +13,7 @@ import type {
   CrossVenuePairRecord,
   DashboardPayload,
   HealthPayload,
+  IntelligenceCommandCenterPayload,
   KalshiMarketSummary,
   MarketBookSnapshotResponse,
   PaperBlotterResponse,
@@ -37,6 +39,9 @@ export default function App() {
   const [crossPairs, setCrossPairs] = useState<CrossVenuePairRecord[]>([]);
   const [crossOpps, setCrossOpps] = useState<CrossVenueOpportunityRecord[]>([]);
   const [paperBlotter, setPaperBlotter] = useState<PaperBlotterResponse | null>(null);
+  const [intelligenceData, setIntelligenceData] =
+    useState<IntelligenceCommandCenterPayload | null>(null);
+  const [intelligenceLoading, setIntelligenceLoading] = useState(false);
 
   const loadSelectedBook = useCallback(async (marketId: string) => {
     setSelectedMarketId(marketId);
@@ -80,6 +85,18 @@ export default function App() {
     }
   }, []);
 
+  const loadIntelligenceCenter = useCallback(async () => {
+    setIntelligenceLoading(true);
+    try {
+      const res = await certaintyApi.getIntelligenceCommandCenter();
+      setIntelligenceData(res);
+    } catch {
+      // Surfaced via command-center loader state
+    } finally {
+      setIntelligenceLoading(false);
+    }
+  }, []);
+
   const loadAll = useCallback(
     async (probeVenues = true) => {
       try {
@@ -116,6 +133,7 @@ export default function App() {
   useEffect(() => {
     void loadAll(true);
     void loadKalshiMarkets();
+    void loadIntelligenceCenter();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -184,7 +202,10 @@ export default function App() {
           scanning={scanning}
           killSwitchActive={killSwitchActive}
           onRunScan={() => void handleRunScan()}
-          onRefresh={() => void loadAll(true)}
+          onRefresh={() => {
+            void loadAll(true);
+            void loadIntelligenceCenter();
+          }}
         />
 
         <main className="flex-1 p-6 max-w-[1440px] w-full mx-auto space-y-5">
@@ -276,6 +297,16 @@ export default function App() {
                   onRefreshKalshi={loadKalshiMarkets}
                   onRefreshCrossVenue={async () => {
                     await Promise.all([loadCrossVenueAndBlotter(), loadAll(false)]);
+                  }}
+                />
+              ) : null}
+
+              {activeTab === 'intelligence' ? (
+                <IntelligenceCenterView
+                  data={intelligenceData}
+                  loading={intelligenceLoading}
+                  onRefresh={async () => {
+                    await Promise.all([loadIntelligenceCenter(), loadAll(false)]);
                   }}
                 />
               ) : null}

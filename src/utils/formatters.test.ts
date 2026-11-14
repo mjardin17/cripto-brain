@@ -1,13 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  computeBudgetUtilizationPct,
   describeProvenance,
   filterOpportunities,
+  formatDurationSeconds,
   formatPct,
   formatPrice,
+  formatProbPct,
+  formatScoreMetric,
   formatUsd,
   getRiskDryRunPreset,
+  summarizeAgentTaskStatus,
   summarizeExecutionOutcome,
+  summarizeValidationStatus,
 } from './formatters';
 import type { ArbitrageOpportunity } from '../types/certainty';
 
@@ -93,3 +99,29 @@ test('provenance descriptor, execution outcome formatter, and dry-run presets be
   const livePreset = getRiskDryRunPreset('LIVE_ATTEMPT');
   assert.equal(livePreset.execution_mode, 'LIVE');
 });
+
+test('Stage 3D probability, task status, and model budget formatters handle bounds cleanly', () => {
+  assert.equal(formatScoreMetric(0.04123, 4), '0.0412');
+  assert.equal(formatScoreMetric(null), '—');
+  assert.equal(formatProbPct(0.725), '72.5%');
+  assert.equal(formatProbPct(undefined), '—');
+  assert.equal(summarizeAgentTaskStatus('COMPLETED').toneClass, 'text-emerald-400');
+  assert.equal(summarizeAgentTaskStatus('ESCALATED').toneClass, 'text-rose-400');
+  assert.equal(summarizeAgentTaskStatus('BLOCKED').toneClass, 'text-amber-400');
+  assert.equal(computeBudgetUtilizationPct(0.125, 0.5), 25);
+  assert.equal(computeBudgetUtilizationPct(1.2, 0.5), 100);
+  assert.equal(computeBudgetUtilizationPct(0.1, 0), 0);
+});
+
+test('Stage 3E provenance labels, duration formatter, and validation status helpers distinguish modes clearly', () => {
+  assert.equal(describeProvenance('HISTORICAL').label, 'HISTORICAL');
+  assert.equal(describeProvenance('SHORT_VALIDATION').label, 'SHORT VALIDATION');
+  assert.equal(describeProvenance('SOAK_TEST').label, 'SOAK TEST');
+  assert.equal(formatDurationSeconds(42.34), '42.3s');
+  assert.equal(formatDurationSeconds(3665), '1h 01m 05s');
+  assert.equal(formatDurationSeconds(null), '—');
+  assert.equal(summarizeValidationStatus('REJECTED_INJECTION').toneClass, 'text-rose-400');
+  assert.equal(summarizeValidationStatus('VERIFIED').toneClass, 'text-emerald-400');
+  assert.equal(summarizeValidationStatus('STOPPED_EARLY').toneClass, 'text-amber-400');
+});
+

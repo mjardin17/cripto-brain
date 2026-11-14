@@ -13,6 +13,7 @@ const TAB_TITLES: Record<WorkspaceTab, string> = {
   command: 'Workspace / Command Center',
   scanner: 'Workspace / Tier 1 Polymarket Scanner & Order Book',
   cross_venue: 'Workspace / Kalshi Cross-Venue & Paper Execution Simulator',
+  intelligence: 'Workspace / Intelligence, Calibration & Agent Command Center',
   risk: 'Workspace / Deterministic Risk Gate & Audit Trail',
   architecture: 'Workspace / Persistent Memory & Phase 0 Audit',
 };
