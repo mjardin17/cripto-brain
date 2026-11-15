@@ -1,7 +1,10 @@
 import type {
+  AdminUserRecord,
   AdversarialReviewRecord,
   AgentMemoryEntry,
   AgentTaskRecord,
+  AuthStatusResponse,
+  AuthenticatedUserRecord,
   ConcurrencyStressRunRecord,
   ConfigVersionRecord,
   CrossVenueOpportunityRecord,
@@ -22,37 +25,94 @@ import type {
   PaperExecuteResponse,
   PaperExecutionScenario,
   PaperStressSuiteResponse,
+  PasswordResetTokenResponse,
   PredictionRecord,
   ResearchValidationRecord,
   RiskAuditEntry,
   RiskEvalResponse,
   ScanResponse,
+  SecurityAuditLogRecord,
+  SessionRecord,
   SoakMode,
   SoakRunRecord,
   SystemEventRecord,
+  UserRole,
 } from '../types/certainty';
-import type { RiskDryRunFormState } from '../utils/formatters';
+import { parseApiJsonResponse, type RiskDryRunFormState } from '../utils/formatters';
+
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+let unauthorizedHandler: ((detail: string) => void) | null = null;
+let forbiddenHandler: ((detail: string) => void) | null = null;
+
+export function registerAuthHandlers(handlers: {
+  onUnauthorized?: (detail: string) => void;
+  onForbidden?: (detail: string) => void;
+}): void {
+  unauthorizedHandler = handlers.onUnauthorized ?? null;
+  forbiddenHandler = handlers.onForbidden ?? null;
+}
+
+function getCsrfTokenFromCookie(): string | null {
+  if (typeof document === 'undefined' || !document.cookie) return null;
+  const parts = document.cookie.split(';');
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith('certainty_csrf=')) {
+      return decodeURIComponent(trimmed.slice('certainty_csrf='.length));
+    }
+  }
+  return null;
+}
 
 async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method || 'GET').toUpperCase();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((init?.headers as Record<string, string> | undefined) ?? {}),
+  };
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const csrf = getCsrfTokenFromCookie();
+    if (csrf) {
+      headers['X-CSRF-Token'] = csrf;
+    }
+  }
+
   const response = await fetch(url, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
+    credentials: 'same-origin',
+    headers,
   });
 
-  if (!response.ok) {
-    let detail = `HTTP ${response.status}`;
-    try {
-      const errBody = await response.json();
-      detail = errBody.detail || errBody.error || detail;
-    } catch {
-      // Ignore parse error
+  const rawText = await response.text();
+  const parsed = parseApiJsonResponse(
+    rawText,
+    response.headers.get('content-type') || '',
+    response.ok,
+    response.status
+  );
+
+  if (!parsed.ok) {
+    const detail = parsed.errorDetail || `HTTP ${parsed.status}`;
+    const isAuthAttempt =
+      url.startsWith('/api/auth/login') ||
+      url.startsWith('/api/auth/bootstrap-owner') ||
+      url.startsWith('/api/auth/reset-password');
+    if (parsed.status === 401 && !isAuthAttempt && unauthorizedHandler) {
+      unauthorizedHandler(detail);
+    } else if (parsed.status === 403 && !isAuthAttempt && forbiddenHandler) {
+      forbiddenHandler(detail);
     }
-    throw new Error(detail);
+    throw new ApiError(parsed.status, detail);
   }
-  return response.json() as Promise<T>;
+
+  return parsed.data as T;
 }
 
 export const certaintyApi = {
@@ -331,5 +391,139 @@ export const certaintyApi = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  // Stage 4A: Authentication, Sessions, Users & Security Audit Log
+  getAuthStatus: () => apiFetch<AuthStatusResponse>('/api/auth/status'),
+
+  bootstrapOwner: (payload: {
+    username: string;
+    password: string;
+    email?: string;
+    bootstrap_token?: string;
+  }) =>
+    apiFetch<{ enrolled: boolean; user: AuthenticatedUserRecord; expires_at: string }>(
+      '/api/auth/bootstrap-owner',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  login: (payload: { username: string; password: string }) =>
+    apiFetch<{ authenticated: boolean; user: AuthenticatedUserRecord; expires_at: string }>(
+      '/api/auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  logout: () =>
+    apiFetch<{ logged_out: boolean }>('/api/auth/logout', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  getMe: () => apiFetch<{ user: AuthenticatedUserRecord }>('/api/auth/me'),
+
+  changePassword: (payload: { current_password: string; new_password: string }) =>
+    apiFetch<{ password_changed: boolean; user: AuthenticatedUserRecord; expires_at: string }>(
+      '/api/auth/change-password',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  confirmPasswordReset: (payload: { reset_token: string; new_password: string }) =>
+    apiFetch<{ reset_completed: boolean; username: string; sessions_revoked: number }>(
+      '/api/auth/reset-password/confirm',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  getOwnSessions: () =>
+    apiFetch<{ count: number; items: SessionRecord[] }>('/api/auth/sessions'),
+
+  revokeOwnSession: (sessionId: string, reason = 'Revoked by user') =>
+    apiFetch<{ session_id: string; revoked: boolean }>(
+      `/api/auth/sessions/${encodeURIComponent(sessionId)}/revoke`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }
+    ),
+
+  adminListUsers: () =>
+    apiFetch<{ count: number; items: AdminUserRecord[] }>('/api/admin/users'),
+
+  adminCreateUser: (payload: {
+    username: string;
+    password: string;
+    role: UserRole;
+    email?: string;
+    must_rotate_password?: boolean;
+  }) =>
+    apiFetch<{ user: AdminUserRecord }>('/api/admin/users', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  adminUpdateUserRole: (userId: string, role: UserRole) =>
+    apiFetch<{ user: AdminUserRecord }>(
+      `/api/admin/users/${encodeURIComponent(userId)}/role`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ role }),
+      }
+    ),
+
+  adminDeactivateUser: (userId: string) =>
+    apiFetch<{ user: AdminUserRecord }>(
+      `/api/admin/users/${encodeURIComponent(userId)}/deactivate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    ),
+
+  adminReactivateUser: (userId: string) =>
+    apiFetch<{ user: AdminUserRecord }>(
+      `/api/admin/users/${encodeURIComponent(userId)}/reactivate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    ),
+
+  adminIssueResetToken: (userId: string, ttlMinutes = 30) =>
+    apiFetch<PasswordResetTokenResponse>(
+      `/api/admin/users/${encodeURIComponent(userId)}/reset-token`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ ttl_minutes: ttlMinutes }),
+      }
+    ),
+
+  adminListSessions: (includeRevoked = false) =>
+    apiFetch<{ count: number; items: SessionRecord[] }>(
+      `/api/admin/sessions?include_revoked=${includeRevoked}`
+    ),
+
+  adminRevokeSession: (sessionId: string, reason = 'Revoked by OWNER') =>
+    apiFetch<{ session_id: string; revoked: boolean }>(
+      `/api/admin/sessions/${encodeURIComponent(sessionId)}/revoke`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }
+    ),
+
+  adminListAuditLogs: (limit = 120) =>
+    apiFetch<{ count: number; immutable: boolean; items: SecurityAuditLogRecord[] }>(
+      `/api/admin/audit-logs?limit=${limit}`
+    ),
 };
 

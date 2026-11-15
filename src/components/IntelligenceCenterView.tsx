@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Play, RotateCcw, Square, Zap } from 'lucide-react';
 import { certaintyApi } from '../api/client';
-import type { IntelligenceCommandCenterPayload } from '../types/certainty';
+import type { IntelligenceCommandCenterPayload, UserPermissions } from '../types/certainty';
 import {
   computeBudgetUtilizationPct,
   formatProbPct,
@@ -16,6 +16,7 @@ import { OperationsStage3EPanels } from './OperationsStage3EPanels';
 interface IntelligenceCenterViewProps {
   data: IntelligenceCommandCenterPayload | null;
   loading: boolean;
+  permissions?: UserPermissions;
   onRefresh: () => Promise<void>;
 }
 
@@ -30,8 +31,15 @@ const ROLE_DEFAULT_TASKS: Record<string, string> = {
 export function IntelligenceCenterView({
   data,
   loading,
+  permissions,
   onRefresh,
 }: IntelligenceCenterViewProps) {
+  const canDispatchAgents = permissions?.can_dispatch_agents ?? true;
+  const canScaleAgents = permissions?.can_scale_agents ?? true;
+  const canSubmitResearch = permissions?.can_submit_research ?? true;
+  const canResolvePreds = permissions?.can_resolve_predictions ?? true;
+  const canRouteModels = permissions?.can_route_models ?? true;
+  const canActivateConfigs = permissions?.can_activate_configs ?? true;
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -157,14 +165,15 @@ export function IntelligenceCenterView({
             {loopState.running ? (
               <button
                 type="button"
-                disabled={busyAction !== null}
+                disabled={busyAction !== null || !canDispatchAgents}
+                title={canDispatchAgents ? 'Stop background Supervisor loop' : 'Requires OPERATOR or OWNER role'}
                 onClick={() =>
                   void runAction('loop-stop', async () => {
                     const res = await certaintyApi.stopAgentLoop();
                     return `Background Supervisor loop stopped cleanly (${res.shutdown_recovered_count} active leases reclaimed).`;
                   })
                 }
-                className="px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg inline-flex items-center gap-1.5"
+                className="px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed border border-slate-700 text-slate-200 rounded-lg inline-flex items-center gap-1.5"
               >
                 <Square className="w-3 h-3 text-rose-400" />
                 Stop Loop
@@ -172,7 +181,8 @@ export function IntelligenceCenterView({
             ) : (
               <button
                 type="button"
-                disabled={busyAction !== null}
+                disabled={busyAction !== null || !canDispatchAgents}
+                title={canDispatchAgents ? 'Start background Supervisor loop' : 'Requires OPERATOR or OWNER role'}
                 onClick={() =>
                   void runAction('loop-start', async () => {
                     const res = await certaintyApi.startAgentLoop({
@@ -184,7 +194,7 @@ export function IntelligenceCenterView({
                       : 'Started lifecycle-managed background Supervisor loop (5s interval).';
                   })
                 }
-                className="px-2.5 py-1.5 text-xs font-medium bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg inline-flex items-center gap-1.5"
+                className="px-2.5 py-1.5 text-xs font-medium bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg inline-flex items-center gap-1.5"
               >
                 <Play className="w-3 h-3" />
                 Start Loop
@@ -192,7 +202,8 @@ export function IntelligenceCenterView({
             )}
             <button
               type="button"
-              disabled={busyAction !== null || supervisor.kill_switch_active}
+              disabled={busyAction !== null || supervisor.kill_switch_active || !canDispatchAgents}
+              title={canDispatchAgents ? 'Dispatch queued tasks now' : 'Requires OPERATOR or OWNER role'}
               onClick={() =>
                 void runAction('dispatch', async () => {
                   const res = await certaintyApi.dispatchAgentTasks(supervisor.policy.max_concurrency);
@@ -201,7 +212,7 @@ export function IntelligenceCenterView({
                     : `Dispatched ${res.dispatched_count} tasks (${res.completed_count} completed).`;
                 })
               }
-              className="px-2.5 py-1.5 text-xs font-medium bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white rounded-lg inline-flex items-center gap-1.5"
+              className="px-2.5 py-1.5 text-xs font-medium bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg inline-flex items-center gap-1.5"
             >
               <Zap className="w-3 h-3" />
               Dispatch Now
@@ -316,7 +327,8 @@ export function IntelligenceCenterView({
               <select
                 id="max-conc-select"
                 value={supervisor.policy.max_concurrency}
-                disabled={busyAction !== null}
+                disabled={busyAction !== null || !canScaleAgents}
+                title={canScaleAgents ? 'Adjust max concurrency' : 'Requires OPERATOR or OWNER role'}
                 onChange={(e) => {
                   const val = Number(e.target.value);
                   void runAction('scale-cap', async () => {
@@ -324,7 +336,7 @@ export function IntelligenceCenterView({
                     return `Updated bounded max_concurrency to ${val}.`;
                   });
                 }}
-                className="px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                className="px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono disabled:opacity-50"
               >
                 {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
                   <option key={n} value={n}>
@@ -469,10 +481,11 @@ export function IntelligenceCenterView({
             <div className="sm:col-span-12 flex justify-end">
               <button
                 type="submit"
-                disabled={busyAction !== null}
-                className="px-4 py-2 font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white rounded-lg whitespace-nowrap"
+                disabled={busyAction !== null || !canDispatchAgents}
+                title={canDispatchAgents ? 'Queue research task' : 'Requires OPERATOR or OWNER role'}
+                className="px-4 py-2 font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg whitespace-nowrap"
               >
-                Queue Bounded Task
+                {canDispatchAgents ? 'Queue Bounded Task' : 'Queue Locked (OPERATOR Required)'}
               </button>
             </div>
           </form>
@@ -808,10 +821,11 @@ export function IntelligenceCenterView({
                 </div>
                 <button
                   type="submit"
-                  disabled={busyAction !== null}
-                  className="px-4 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 text-white rounded-lg whitespace-nowrap shrink-0"
+                  disabled={busyAction !== null || !canSubmitResearch}
+                  title={canSubmitResearch ? 'Record advisory prediction' : 'Requires ANALYST role or higher'}
+                  className="px-4 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg whitespace-nowrap shrink-0"
                 >
-                  Record Prediction
+                  {canSubmitResearch ? 'Record Prediction' : 'Read-Only'}
                 </button>
               </div>
             </form>
@@ -865,7 +879,8 @@ export function IntelligenceCenterView({
                             <div className="flex items-center gap-1">
                               <button
                                 type="button"
-                                disabled={busyAction !== null}
+                                disabled={busyAction !== null || !canResolvePreds}
+                                title={canResolvePreds ? 'Resolve YES' : 'Requires OPERATOR or OWNER role'}
                                 onClick={() =>
                                   void runAction(`res-${p.prediction_id}-1`, async () => {
                                     const r = await certaintyApi.resolvePrediction(p.prediction_id, {
@@ -874,13 +889,14 @@ export function IntelligenceCenterView({
                                     return `Resolved ${p.prediction_id} = YES (Brier=${r.brier_score?.toFixed(4)}).`;
                                   })
                                 }
-                                className="px-2 py-0.5 text-[11px] font-mono bg-emerald-800/80 hover:bg-emerald-700 text-emerald-100 rounded"
+                                className="px-2 py-0.5 text-[11px] font-mono bg-emerald-800/80 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-emerald-100 rounded"
                               >
                                 YES
                               </button>
                               <button
                                 type="button"
-                                disabled={busyAction !== null}
+                                disabled={busyAction !== null || !canResolvePreds}
+                                title={canResolvePreds ? 'Resolve NO' : 'Requires OPERATOR or OWNER role'}
                                 onClick={() =>
                                   void runAction(`res-${p.prediction_id}-0`, async () => {
                                     const r = await certaintyApi.resolvePrediction(p.prediction_id, {
@@ -889,13 +905,14 @@ export function IntelligenceCenterView({
                                     return `Resolved ${p.prediction_id} = NO (Brier=${r.brier_score?.toFixed(4)}).`;
                                   })
                                 }
-                                className="px-2 py-0.5 text-[11px] font-mono bg-rose-800/80 hover:bg-rose-700 text-rose-100 rounded"
+                                className="px-2 py-0.5 text-[11px] font-mono bg-rose-800/80 hover:bg-rose-700 disabled:opacity-40 disabled:cursor-not-allowed text-rose-100 rounded"
                               >
                                 NO
                               </button>
                               <button
                                 type="button"
-                                disabled={busyAction !== null}
+                                disabled={busyAction !== null || !canResolvePreds}
+                                title={canResolvePreds ? 'Void prediction' : 'Requires OPERATOR or OWNER role'}
                                 onClick={() =>
                                   void runAction(`res-${p.prediction_id}-v`, async () => {
                                     await certaintyApi.resolvePrediction(p.prediction_id, {
@@ -904,7 +921,7 @@ export function IntelligenceCenterView({
                                     return `Marked ${p.prediction_id} VOIDED (excluded from calibration).`;
                                   })
                                 }
-                                className="px-2 py-0.5 text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-200 rounded"
+                                className="px-2 py-0.5 text-[11px] font-mono bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 rounded"
                               >
                                 VOID
                               </button>
@@ -973,7 +990,8 @@ export function IntelligenceCenterView({
             <div className="flex flex-wrap items-center gap-2 pt-1">
               <button
                 type="button"
-                disabled={busyAction !== null}
+                disabled={busyAction !== null || !canRouteModels}
+                title={canRouteModels ? 'Route deterministic request' : 'Requires OPERATOR or OWNER role'}
                 onClick={() =>
                   void runAction('route-det', async () => {
                     const r = await certaintyApi.routeModelRequest({
@@ -984,13 +1002,14 @@ export function IntelligenceCenterView({
                     return `Routed ${r.task_category} -> ${r.selected_tier} ($${r.actual_cost_usd.toFixed(4)}): ${r.reason}`;
                   })
                 }
-                className="px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg"
+                className="px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed border border-slate-700 text-slate-200 rounded-lg"
               >
                 Route Deterministic ($0)
               </button>
               <button
                 type="button"
-                disabled={busyAction !== null}
+                disabled={busyAction !== null || !canRouteModels}
+                title={canRouteModels ? 'Test economical AI route' : 'Requires OPERATOR or OWNER role'}
                 onClick={() =>
                   void runAction('route-ai', async () => {
                     const r = await certaintyApi.routeModelRequest({
@@ -1003,7 +1022,7 @@ export function IntelligenceCenterView({
                     return `Routed ${r.task_category} -> ${r.selected_tier} ($${r.actual_cost_usd.toFixed(4)}): ${r.reason}`;
                   })
                 }
-                className="px-2.5 py-1.5 text-xs font-medium bg-sky-700 hover:bg-sky-600 text-white rounded-lg"
+                className="px-2.5 py-1.5 text-xs font-medium bg-sky-700 hover:bg-sky-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg"
               >
                 Test Economical AI Route
               </button>
@@ -1100,19 +1119,19 @@ export function IntelligenceCenterView({
                       {cfg.status !== 'ACTIVE' && cfg.regression_passed ? (
                         <button
                           type="button"
-                          disabled={busyAction !== null}
+                          disabled={busyAction !== null || !canActivateConfigs}
+                          title={canActivateConfigs ? 'Rollback config version' : 'Requires OWNER role'}
                           onClick={() =>
                             void runAction(`rb-${cfg.config_version_id}`, async () => {
                               const restored = await certaintyApi.rollbackConfig({
                                 config_domain: cfg.config_domain,
                                 target_version: cfg.version,
-                                actor: 'operator',
                                 reason: `UI rollback to v${cfg.version}`,
                               });
                               return `Restored ${restored.config_domain} v${cfg.version} as active v${restored.version}.`;
                             })
                           }
-                          className="px-2 py-1 text-[11px] font-medium bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded inline-flex items-center gap-1"
+                          className="px-2 py-1 text-[11px] font-medium bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-700 text-slate-200 rounded inline-flex items-center gap-1"
                         >
                           <RotateCcw className="w-3 h-3" />
                           Rollback
@@ -1132,7 +1151,12 @@ export function IntelligenceCenterView({
       </div>
 
       {/* Stage 3E: Autonomous Operations & Intelligence Validation (Sections 9–14) */}
-      <OperationsStage3EPanels data={data} busyAction={busyAction} runAction={runAction} />
+      <OperationsStage3EPanels
+        data={data}
+        busyAction={busyAction}
+        permissions={permissions}
+        runAction={runAction}
+      />
     </div>
   );
 }

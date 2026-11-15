@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import create_app
 from backend.storage.duckdb_store import DuckDBStore
+from backend.tests.auth_helpers import authenticate_test_client
 
 
 # ----------------------------------------------------------------------
@@ -107,6 +108,7 @@ def test_background_loop_restart_recovers_expired_leases_and_graceful_shutdown_r
     # Session 2: Starting TestClient (lifespan) must auto-recover expired lease on startup and dispatch cleanly
     app2 = create_app(db_path=db_file, enable_background_loop=True, loop_interval_seconds=0.05)
     with TestClient(app2) as client:
+        authenticate_test_client(client)
         deadline = time.monotonic() + 2.5
         while time.monotonic() < deadline:
             t_cur = app2.state.supervisor.get_task(t1["task_id"])
@@ -425,6 +427,7 @@ def test_stage3d_http_endpoints_and_safety_locks(tmp_path, monkeypatch):
     app = create_app(db_path=db_file, enable_background_loop=True, loop_interval_seconds=5.0)
 
     with TestClient(app) as client:
+        authenticate_test_client(client)
         # Record and resolve prediction over HTTP
         p_resp = client.post(
             "/api/intelligence/predictions",

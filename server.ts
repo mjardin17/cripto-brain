@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import express, { type Request, type Response } from 'express';
@@ -9,17 +9,48 @@ const FASTAPI_PORT = Number(process.env.FASTAPI_PORT || 8010);
 const FASTAPI_ORIGIN = `http://${FASTAPI_HOST}:${FASTAPI_PORT}`;
 
 let pythonProc: ChildProcess | null = null;
+let shuttingDown = false;
 
-function resolvePythonExecutable(): string {
+function pythonHasBackendDeps(pythonBin: string): boolean {
+  try {
+    execFileSync(
+      pythonBin,
+      ['-c', 'import uvicorn, fastapi, duckdb, argon2, httpx, pydantic, itsdangerous'],
+      { cwd: process.cwd(), stdio: 'ignore', timeout: 10000 }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensurePythonEnvironment(): string {
   const venvPython = path.resolve(process.cwd(), '.venv/bin/python');
-  if (fs.existsSync(venvPython)) {
+  if (fs.existsSync(venvPython) && pythonHasBackendDeps(venvPython)) {
     return venvPython;
   }
-  return 'python3';
+  if (pythonHasBackendDeps('python3')) {
+    return 'python3';
+  }
+  const reqFile = path.resolve(process.cwd(), 'requirements.txt');
+  console.log('[server] Python backend dependencies missing; bootstrapping .venv from requirements.txt...');
+  if (!fs.existsSync(venvPython)) {
+    execFileSync('python3', ['-m', 'venv', '.venv'], {
+      cwd: process.cwd(),
+      stdio: 'inherit',
+      timeout: 120000,
+    });
+  }
+  execFileSync(venvPython, ['-m', 'pip', 'install', '-q', '-r', reqFile], {
+    cwd: process.cwd(),
+    stdio: 'inherit',
+    timeout: 300000,
+  });
+  return venvPython;
 }
 
 function startFastApiBackend(): void {
-  const pythonBin = resolvePythonExecutable();
+  const pythonBin = ensurePythonEnvironment();
   pythonProc = spawn(
     pythonBin,
     [
@@ -50,10 +81,18 @@ function startFastApiBackend(): void {
   });
   pythonProc.on('exit', (code, signal) => {
     console.error(`[fastapi] exited with code=${code} signal=${signal}`);
+    if (!shuttingDown && code !== 0) {
+      setTimeout(() => {
+        if (!shuttingDown) {
+          console.log('[fastapi] Restarting FastAPI backend...');
+          startFastApiBackend();
+        }
+      }, 1500);
+    }
   });
 }
 
-async function waitForFastApi(timeoutMs = 15000): Promise<void> {
+async function waitForFastApi(timeoutMs = 30000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -76,6 +115,26 @@ async function proxyApiRequest(req: Request, res: Response): Promise<void> {
   if (req.headers['accept']) {
     headers['accept'] = String(req.headers['accept']);
   }
+  if (req.headers['cookie']) {
+    headers['cookie'] = String(req.headers['cookie']);
+  }
+  if (req.headers['x-csrf-token']) {
+    headers['x-csrf-token'] = String(req.headers['x-csrf-token']);
+  }
+  if (req.headers['origin']) {
+    headers['origin'] = String(req.headers['origin']);
+  }
+  if (req.headers['referer']) {
+    headers['referer'] = String(req.headers['referer']);
+  }
+  if (req.headers['user-agent']) {
+    headers['user-agent'] = String(req.headers['user-agent']);
+  }
+
+  // Forward verified socket IP and transport protocol to FastAPI trusted local proxy
+  const clientIp = req.ip || req.socket.remoteAddress || '127.0.0.1';
+  headers['x-forwarded-for'] = clientIp;
+  headers['x-forwarded-proto'] = req.protocol || 'http';
 
   const hasBody = !['GET', 'HEAD'].includes(req.method.toUpperCase());
   const body = hasBody && req.body !== undefined ? JSON.stringify(req.body) : undefined;
@@ -89,6 +148,24 @@ async function proxyApiRequest(req: Request, res: Response): Promise<void> {
       headers,
       body,
     });
+    const getSetCookie = (upstream.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie;
+    const setCookies = typeof getSetCookie === 'function' ? getSetCookie.call(upstream.headers) : [];
+    if (setCookies.length > 0) {
+      res.setHeader('Set-Cookie', setCookies);
+    } else {
+      const singleSetCookie = upstream.headers.get('set-cookie');
+      if (singleSetCookie) {
+        res.setHeader('Set-Cookie', singleSetCookie);
+      }
+    }
+    const retryAfter = upstream.headers.get('retry-after');
+    if (retryAfter) {
+      res.setHeader('Retry-After', retryAfter);
+    }
+    const cacheControl = upstream.headers.get('cache-control');
+    if (cacheControl) {
+      res.setHeader('Cache-Control', cacheControl);
+    }
     const text = await upstream.text();
     const contentType = upstream.headers.get('content-type') || 'application/json';
     res.status(upstream.status).type(contentType).send(text);
@@ -111,10 +188,19 @@ async function main() {
 
   const app = express();
   app.disable('x-powered-by');
-  app.use((_req, res, next) => {
+  if (process.env.CERTAINTY_TRUST_UPSTREAM_PROXY === 'true') {
+    app.set('trust proxy', 1);
+  }
+  app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (req.path.startsWith('/api')) {
+      res.setHeader('X-Frame-Options', 'DENY');
+    }
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    if (process.env.NODE_ENV === 'production' || process.env.CERTAINTY_ENV === 'production') {
+      res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
+    }
     next();
   });
   app.use(express.json({ limit: '2mb' }));
@@ -142,6 +228,7 @@ async function main() {
   });
 
   const shutdown = () => {
+    shuttingDown = true;
     server.close();
     if (pythonProc && !pythonProc.killed) {
       pythonProc.kill('SIGTERM');

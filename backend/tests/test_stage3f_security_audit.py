@@ -24,6 +24,7 @@ from backend.main import create_app, sanitize_error_message
 from backend.risk_gate.engine import DeterministicRiskGate, RiskEvaluationRequest
 from backend.risk_gate.policy import RiskPolicy
 from backend.storage.duckdb_store import DuckDBStore
+from backend.tests.auth_helpers import authenticate_test_client
 
 
 # ----------------------------------------------------------------------
@@ -125,6 +126,7 @@ def test_secret_non_leakage_across_endpoints_and_error_paths(tmp_path, monkeypat
     assert "secret-upstream-token-abcdef" not in sanitize_error_message(bearer)
 
     with TestClient(app) as client:
+        authenticate_test_client(client)
         for url in (
             "/api/health?probe_venues=false",
             "/api/dashboard",
@@ -426,6 +428,7 @@ def test_disposable_duckdb_backup_corruption_and_verified_restore(tmp_path):
     # 4. Boot full FastAPI application against restored database and verify all core routes
     app2 = create_app(db_path=str(restored_from_file), enable_background_loop=False)
     with TestClient(app2) as client:
+        authenticate_test_client(client)
         h = client.get("/api/health?probe_venues=false")
         assert h.status_code == 200
         assert h.json()["live_trading_enabled"] is False

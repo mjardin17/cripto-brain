@@ -658,6 +658,87 @@ class DuckDBStore:
                 )
                 """
             )
+            # Stage 4A additive authentication, RBAC, session, rate limit & audit tables
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id VARCHAR PRIMARY KEY,
+                    username VARCHAR UNIQUE NOT NULL,
+                    email VARCHAR,
+                    role VARCHAR NOT NULL,
+                    password_hash VARCHAR NOT NULL,
+                    is_active BOOLEAN NOT NULL,
+                    must_rotate_password BOOLEAN NOT NULL,
+                    failed_login_attempts INTEGER NOT NULL,
+                    locked_until VARCHAR,
+                    last_login_at VARCHAR,
+                    created_at VARCHAR NOT NULL,
+                    updated_at VARCHAR NOT NULL,
+                    created_by VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id VARCHAR PRIMARY KEY,
+                    token_hash VARCHAR UNIQUE NOT NULL,
+                    csrf_token_hash VARCHAR NOT NULL,
+                    user_id VARCHAR NOT NULL,
+                    username VARCHAR NOT NULL,
+                    role_snapshot VARCHAR NOT NULL,
+                    ip_address VARCHAR NOT NULL,
+                    user_agent VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL,
+                    expires_at VARCHAR NOT NULL,
+                    last_seen_at VARCHAR NOT NULL,
+                    revoked_at VARCHAR,
+                    revoked_reason VARCHAR
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                    reset_id VARCHAR PRIMARY KEY,
+                    token_hash VARCHAR UNIQUE NOT NULL,
+                    user_id VARCHAR NOT NULL,
+                    created_by VARCHAR NOT NULL,
+                    expires_at VARCHAR NOT NULL,
+                    used_at VARCHAR,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS security_audit_log (
+                    audit_id VARCHAR PRIMARY KEY,
+                    event_type VARCHAR NOT NULL,
+                    outcome VARCHAR NOT NULL,
+                    user_id VARCHAR,
+                    username VARCHAR,
+                    role VARCHAR,
+                    ip_address VARCHAR NOT NULL,
+                    endpoint VARCHAR NOT NULL,
+                    method VARCHAR NOT NULL,
+                    detail_json VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+                    bucket_key VARCHAR PRIMARY KEY,
+                    bucket_class VARCHAR NOT NULL,
+                    window_start_epoch DOUBLE NOT NULL,
+                    request_count INTEGER NOT NULL,
+                    blocked_count INTEGER NOT NULL,
+                    updated_at VARCHAR NOT NULL
+                )
+                """
+            )
 
     def _seed_initial_memory_if_empty(self) -> None:
         with self._lock:
@@ -1494,6 +1575,11 @@ class DuckDBStore:
             advrevs = self._conn.execute("SELECT COUNT(*) FROM adversarial_reviews").fetchone()[0]
             pstress = self._conn.execute("SELECT COUNT(*) FROM paper_stress_runs").fetchone()[0]
             sysevts = self._conn.execute("SELECT COUNT(*) FROM system_events").fetchone()[0]
+            users_cnt = self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            active_sess = self._conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL"
+            ).fetchone()[0]
+            sec_audits = self._conn.execute("SELECT COUNT(*) FROM security_audit_log").fetchone()[0]
             return {
                 "snapshots": int(snaps),
                 "opportunities": int(opps),
@@ -1518,6 +1604,9 @@ class DuckDBStore:
                 "adversarial_reviews": int(advrevs),
                 "paper_stress_runs": int(pstress),
                 "system_events": int(sysevts),
+                "users": int(users_cnt),
+                "active_sessions": int(active_sess),
+                "security_audit_logs": int(sec_audits),
             }
 
     def close(self) -> None:

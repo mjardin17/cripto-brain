@@ -15,6 +15,7 @@ from backend.intelligence.learning_engine import LearningEngine
 from backend.intelligence.memory_manager import StructuredMemoryManager
 from backend.intelligence.supervisor import SupervisorOrchestrator
 from backend.main import create_app
+from backend.tests.auth_helpers import authenticate_test_client
 from backend.risk_gate.engine import DeterministicRiskGate
 from backend.risk_gate.policy import RiskPolicy
 from backend.storage.duckdb_store import DuckDBStore
@@ -378,6 +379,7 @@ def test_five_agents_and_stage3c_http_endpoints(tmp_path):
     db_file = tmp_path / "stage3c_api.duckdb"
     app = create_app(db_path=str(db_file))
     with TestClient(app) as client:
+        authenticate_test_client(client)
         status = client.get("/api/agents/status")
         assert status.status_code == 200
         s_body = status.json()

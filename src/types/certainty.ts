@@ -1108,3 +1108,101 @@ export interface IntelligenceCommandCenterPayload {
   generated_at: string;
 }
 
+// ----------------------------------------------------------------------
+// Stage 4A: Authentication, RBAC, Sessions & Security Audit Types
+// ----------------------------------------------------------------------
+
+export type UserRole = 'OWNER' | 'OPERATOR' | 'ANALYST' | 'READ_ONLY';
+
+export interface UserPermissions {
+  can_read_dashboards: boolean;
+  can_submit_research: boolean;
+  can_evaluate_risk_dry_run: boolean;
+  can_propose_configs: boolean;
+  can_run_scans: boolean;
+  can_manage_pairs: boolean;
+  can_execute_paper_trades: boolean;
+  can_dispatch_agents: boolean;
+  can_scale_agents: boolean;
+  can_resolve_predictions: boolean;
+  can_route_models: boolean;
+  can_run_validation_labs: boolean;
+  can_toggle_kill_switch: boolean;
+  can_activate_configs: boolean;
+  can_manage_users: boolean;
+  can_manage_all_sessions: boolean;
+  can_view_security_audit: boolean;
+}
+
+export interface AuthenticatedUserRecord {
+  user_id: string;
+  username: string;
+  email: string | null;
+  role: UserRole;
+  session_id: string;
+  is_active: boolean;
+  must_rotate_password: boolean;
+  permissions: UserPermissions;
+}
+
+export interface AuthStatusResponse {
+  authenticated: boolean;
+  needs_owner_bootstrap: boolean;
+  env_mode: string;
+  cookie_secure: boolean;
+  tls_required: boolean;
+  csrf_header_name: string;
+  user: AuthenticatedUserRecord | null;
+}
+
+export interface AdminUserRecord {
+  user_id: string;
+  username: string;
+  email: string | null;
+  role: UserRole;
+  is_active: boolean;
+  must_rotate_password: boolean;
+  failed_login_attempts: number;
+  locked_until: string | null;
+  last_login_at: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+}
+
+export interface SessionRecord {
+  session_id: string;
+  user_id: string;
+  username: string;
+  role_snapshot: UserRole;
+  ip_address: string;
+  user_agent: string;
+  created_at: string;
+  expires_at: string;
+  last_seen_at: string;
+  revoked_at: string | null;
+  revoked_reason: string | null;
+}
+
+export interface SecurityAuditLogRecord {
+  audit_id: string;
+  event_type: string;
+  outcome: string;
+  user_id: string | null;
+  username: string | null;
+  role: string | null;
+  ip_address: string;
+  endpoint: string;
+  method: string;
+  detail: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface PasswordResetTokenResponse {
+  reset_id: string;
+  user_id: string;
+  username: string;
+  reset_token: string;
+  expires_at: string;
+}
+

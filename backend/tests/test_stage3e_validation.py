@@ -22,6 +22,7 @@ from backend.intelligence.validation_labs import (
     ResearchQualityValidator,
 )
 from backend.main import create_app
+from backend.tests.auth_helpers import authenticate_test_client
 from backend.risk_gate.engine import DeterministicRiskGate
 from backend.risk_gate.policy import RiskPolicy
 from backend.storage.duckdb_store import DuckDBStore
@@ -418,6 +419,7 @@ def test_stage3e_endpoints_and_budget_and_no_secret_exposure(tmp_path):
     db_file = str(tmp_path / "e2e_stage3e.duckdb")
     app = create_app(db_path=db_file, enable_background_loop=False)
     with TestClient(app) as client:
+        authenticate_test_client(client)
         # 1. Operational health & system events
         h = client.get("/api/operations/health")
         assert h.status_code == 200

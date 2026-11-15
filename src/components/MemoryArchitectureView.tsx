@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import type { AgentMemoryEntry, ModuleRegistryItem } from '../types/certainty';
+import type { AgentMemoryEntry, ModuleRegistryItem, UserPermissions } from '../types/certainty';
 import { formatTimestampShort } from '../utils/formatters';
 import { ProvenanceLabel } from './ProvenanceLabel';
 
 interface MemoryArchitectureViewProps {
   memories: AgentMemoryEntry[];
   modules: ModuleRegistryItem[];
+  permissions?: UserPermissions;
   onCreateMemory: (payload: {
     category: string;
     title: string;
@@ -30,8 +31,8 @@ const PHASE0_FINDINGS = [
   {
     item: 'Kalshi Trade API v2 (api.elections.kalshi.com)',
     finding:
-      'Verified reachable for Phase 2 planning. Cross-venue paper execution and matching remain disabled until Phase 1 passes acceptance and Phase 2 is approved.',
-    status: 'PHASE 2',
+      'Active read-only market discovery and order book ingestion for cross-venue research and simulated paper execution. Live fund transfers and real order submission remain permanently disabled.',
+    status: 'ACTIVE READ-ONLY',
   },
   {
     item: 'Execution & Signing Isolation',
@@ -44,8 +45,10 @@ const PHASE0_FINDINGS = [
 export function MemoryArchitectureView({
   memories,
   modules,
+  permissions,
   onCreateMemory,
 }: MemoryArchitectureViewProps) {
+  const canSubmitResearch = permissions?.can_submit_research ?? true;
   const [category, setCategory] = useState('VERIFIED_LESSON');
   const [title, setTitle] = useState('');
   const [summary, setSummary] = useState('');
@@ -103,13 +106,13 @@ export function MemoryArchitectureView({
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-sm font-semibold text-slate-100">
-              Phase 2, Tier 2 &amp; Tier 3 Module Boundaries
+              Venue &amp; Strategy Tier Module Boundaries
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              All Kalshi, paper execution, crypto perpetuals, and AI research modules remain strictly inactive until Phase 1 approval.
+              Tier 1 Polymarket &amp; Kalshi read-only scanners and cross-venue paper simulator are active; Tier 2 Crypto Delta-Neutral and Tier 3 AI Research remain permanently INACTIVE.
             </p>
           </div>
-          <ProvenanceLabel provenance="UNAVAILABLE" />
+          <ProvenanceLabel provenance="LIVE" detail="Policy Locked" />
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -183,10 +186,15 @@ export function MemoryArchitectureView({
             </div>
             <button
               type="submit"
-              disabled={saving}
-              className="w-full px-4 py-2 font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-60 rounded-lg transition-colors"
+              disabled={saving || !canSubmitResearch}
+              title={canSubmitResearch ? 'Persist memory entry' : 'Requires ANALYST role or higher'}
+              className="w-full px-4 py-2 font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
             >
-              {saving ? 'Saving to DuckDB...' : 'Persist to Agent Memory'}
+              {saving
+                ? 'Saving to DuckDB...'
+                : !canSubmitResearch
+                  ? 'Read-Only Access'
+                  : 'Persist to Agent Memory'}
             </button>
           </form>
         </section>

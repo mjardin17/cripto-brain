@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { certaintyApi } from './api/client';
+import { X } from 'lucide-react';
+import { ApiError, certaintyApi, registerAuthHandlers } from './api/client';
+import { AdminAccessView } from './components/AdminAccessView';
+import { AuthGateView } from './components/AuthGateView';
 import { CommandCenterView } from './components/CommandCenterView';
 import { CrossVenuePaperView } from './components/CrossVenuePaperView';
 import { IntelligenceCenterView } from './components/IntelligenceCenterView';
@@ -9,6 +12,8 @@ import { ScannerView } from './components/ScannerView';
 import { SidebarNav, type WorkspaceTab } from './components/SidebarNav';
 import { TopBar } from './components/TopBar';
 import type {
+  AuthStatusResponse,
+  AuthenticatedUserRecord,
   CrossVenueOpportunityRecord,
   CrossVenuePairRecord,
   DashboardPayload,
@@ -18,13 +23,28 @@ import type {
   MarketBookSnapshotResponse,
   PaperBlotterResponse,
 } from './types/certainty';
-import type { RiskDryRunFormState } from './utils/formatters';
+import { canAccessWorkspaceTab, type RiskDryRunFormState } from './utils/formatters';
 
 export default function App() {
+  const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
+  const [authUser, setAuthUser] = useState<AuthenticatedUserRecord | null>(null);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  const [forbiddenNotice, setForbiddenNotice] = useState<string | null>(null);
+
+  // Change password modal state
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
+
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('command');
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
   const [health, setHealth] = useState<HealthPayload | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [scanNotice, setScanNotice] = useState<string | null>(null);
@@ -42,6 +62,71 @@ export default function App() {
   const [intelligenceData, setIntelligenceData] =
     useState<IntelligenceCommandCenterPayload | null>(null);
   const [intelligenceLoading, setIntelligenceLoading] = useState(false);
+
+  const resetWorkspaceState = useCallback(() => {
+    setDashboard(null);
+    setHealth(null);
+    setSelectedMarketId(null);
+    setSelectedBook(null);
+    setKalshiMarkets([]);
+    setCrossPairs([]);
+    setCrossOpps([]);
+    setPaperBlotter(null);
+    setIntelligenceData(null);
+    setActiveTab('command');
+  }, []);
+
+  const refreshAuthStatus = useCallback(async () => {
+    setError(null);
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const status = await certaintyApi.getAuthStatus();
+        setAuthStatus(status);
+        setAuthUser(status.user);
+        setError(null);
+        if (!status.user) {
+          resetWorkspaceState();
+        }
+        setAuthChecking(false);
+        return;
+      } catch (err) {
+        const transient =
+          err instanceof ApiError
+            ? err.status === 502 || err.status === 503 || err.status === 504
+            : true;
+        if (transient && attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          continue;
+        }
+        setError(err instanceof Error ? err.message : 'Unable to reach authentication service');
+      }
+    }
+    setAuthChecking(false);
+  }, [resetWorkspaceState]);
+
+  useEffect(() => {
+    registerAuthHandlers({
+      onUnauthorized: (detail) => {
+        setAuthUser(null);
+        resetWorkspaceState();
+        setSessionNotice(
+          detail && detail !== 'Authentication required'
+            ? `Session ended: ${detail}`
+            : 'Your session expired or was revoked. Sign in again to continue.'
+        );
+        void refreshAuthStatus();
+      },
+      onForbidden: (detail) => {
+        setForbiddenNotice(`Access Denied (403): ${detail}`);
+      },
+    });
+    return () => registerAuthHandlers({});
+  }, [refreshAuthStatus, resetWorkspaceState]);
+
+  useEffect(() => {
+    void refreshAuthStatus();
+  }, [refreshAuthStatus]);
 
   const loadSelectedBook = useCallback(async (marketId: string) => {
     setSelectedMarketId(marketId);
@@ -100,6 +185,7 @@ export default function App() {
   const loadAll = useCallback(
     async (probeVenues = true) => {
       try {
+        setLoading(true);
         setError(null);
         const dashPromise = certaintyApi.getDashboard();
         const shouldFetchHealth = probeVenues || !health;
@@ -130,12 +216,70 @@ export default function App() {
     [health, loadCrossVenueAndBlotter, loadSelectedBook, selectedMarketId]
   );
 
+  // Trigger protected workspace fetches only after session is verified
   useEffect(() => {
+    if (!authUser) return;
     void loadAll(true);
     void loadKalshiMarkets();
     void loadIntelligenceCenter();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [authUser?.user_id]);
+
+  // Keep activeTab valid if user role changes
+  useEffect(() => {
+    if (authUser && !canAccessWorkspaceTab(authUser.role, activeTab)) {
+      setActiveTab('command');
+    }
+  }, [activeTab, authUser]);
+
+  const handleAuthenticated = (user: AuthenticatedUserRecord) => {
+    setAuthUser(user);
+    setSessionNotice(null);
+    setForbiddenNotice(null);
+    setAuthStatus((prev) =>
+      prev
+        ? { ...prev, authenticated: true, needs_owner_bootstrap: false, user }
+        : prev
+    );
+  };
+
+  const handleLogout = async () => {
+    try {
+      await certaintyApi.logout();
+    } catch {
+      // Even if cookie already expired, clear local view state
+    }
+    setAuthUser(null);
+    resetWorkspaceState();
+    setSessionNotice('Signed out cleanly. Session revoked server-side.');
+    await refreshAuthStatus();
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordError(null);
+    setPasswordSuccess(null);
+    if (newPassword !== confirmNewPassword) {
+      setPasswordError('New password and confirmation do not match.');
+      return;
+    }
+    setPasswordBusy(true);
+    try {
+      const res = await certaintyApi.changePassword({
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
+      setAuthUser(res.user);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setPasswordSuccess('Password updated and active session rotated.');
+    } catch (err) {
+      setPasswordError(err instanceof Error ? err.message : 'Failed to update password');
+    } finally {
+      setPasswordBusy(false);
+    }
+  };
 
   const handleRunScan = async (params?: {
     limit: number;
@@ -164,7 +308,7 @@ export default function App() {
   };
 
   const handleToggleKillSwitch = async (active: boolean, reason: string) => {
-    await certaintyApi.toggleKillSwitch({ active, reason, actor: 'operator' });
+    await certaintyApi.toggleKillSwitch({ active, reason });
     await loadAll(false);
   };
 
@@ -184,6 +328,57 @@ export default function App() {
     await loadAll(false);
   };
 
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-[#0B111B] text-slate-300 flex items-center justify-center p-6 text-xs font-mono">
+        Verifying server session...
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    if (!authStatus && error) {
+      return (
+        <div className="min-h-screen bg-[#0B111B] text-slate-100 flex items-center justify-center p-6">
+          <div className="w-full max-w-md rounded-2xl border border-rose-900/70 bg-[#111827] p-6 space-y-4">
+            <div className="text-sm font-semibold text-rose-300">
+              FastAPI Security Service Unavailable
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">{error}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthChecking(true);
+                void refreshAuthStatus();
+              }}
+              className="px-4 py-2 text-xs font-semibold bg-sky-600 hover:bg-sky-500 text-white rounded-lg transition-colors"
+            >
+              Retry Connection
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <AuthGateView
+        authStatus={
+          authStatus ?? {
+            authenticated: false,
+            needs_owner_bootstrap: false,
+            env_mode: 'development',
+            cookie_secure: false,
+            tls_required: false,
+            csrf_header_name: 'X-CSRF-Token',
+            user: null,
+          }
+        }
+        sessionNotice={sessionNotice || error}
+        onAuthenticated={handleAuthenticated}
+        onRefreshStatus={refreshAuthStatus}
+      />
+    );
+  }
+
   const killSwitchActive = dashboard?.risk_gate.kill_switch.active ?? false;
 
   return (
@@ -194,6 +389,7 @@ export default function App() {
         killSwitchActive={killSwitchActive}
         auditsCount={dashboard?.risk_gate.total_audits ?? 0}
         opportunitiesCount={dashboard?.historical_opportunities_count ?? 0}
+        user={authUser}
       />
 
       <div className="flex-1 min-w-0 flex flex-col">
@@ -201,14 +397,59 @@ export default function App() {
           activeTab={activeTab}
           scanning={scanning}
           killSwitchActive={killSwitchActive}
+          user={authUser}
           onRunScan={() => void handleRunScan()}
           onRefresh={() => {
             void loadAll(true);
             void loadIntelligenceCenter();
           }}
+          onOpenChangePassword={() => {
+            setPasswordError(null);
+            setPasswordSuccess(null);
+            setShowChangePassword(true);
+          }}
+          onLogout={() => void handleLogout()}
         />
 
         <main className="flex-1 p-6 max-w-[1440px] w-full mx-auto space-y-5">
+          {authUser.must_rotate_password ? (
+            <div
+              role="status"
+              className="px-4 py-3 rounded-lg border border-amber-700/70 bg-amber-950/30 text-xs text-amber-200 flex flex-wrap items-center justify-between gap-3"
+            >
+              <span>
+                Your account is flagged for password rotation. Update your password to clear this notice.
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setPasswordError(null);
+                  setPasswordSuccess(null);
+                  setShowChangePassword(true);
+                }}
+                className="px-3 py-1 font-semibold bg-amber-700 hover:bg-amber-600 text-white rounded"
+              >
+                Rotate Password Now
+              </button>
+            </div>
+          ) : null}
+
+          {forbiddenNotice ? (
+            <div
+              role="alert"
+              className="px-4 py-3 rounded-lg border border-rose-800/70 bg-rose-950/30 text-xs text-rose-200 flex items-center justify-between gap-4"
+            >
+              <span>{forbiddenNotice}</span>
+              <button
+                type="button"
+                onClick={() => setForbiddenNotice(null)}
+                className="text-rose-300 hover:text-white shrink-0"
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : null}
+
           {scanNotice ? (
             <div
               role="status"
@@ -239,11 +480,16 @@ export default function App() {
             </div>
           ) : null}
 
-          {loading && !dashboard ? (
+          {activeTab === 'access' && authUser.role === 'OWNER' ? (
+            <AdminAccessView currentUser={authUser} />
+          ) : loading && !dashboard ? (
             <div className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
                 {[1, 2, 3, 4].map((idx) => (
-                  <div key={idx} className="h-28 rounded-xl bg-[#111827] border border-slate-800 animate-pulse" />
+                  <div
+                    key={idx}
+                    className="h-28 rounded-xl bg-[#111827] border border-slate-800 animate-pulse"
+                  />
                 ))}
               </div>
               <div className="h-72 rounded-xl bg-[#111827] border border-slate-800 animate-pulse" />
@@ -259,6 +505,7 @@ export default function App() {
                   bookLoading={bookLoading}
                   bookError={bookError}
                   scanning={scanning}
+                  canRunScans={authUser.permissions.can_run_scans}
                   onSelectMarket={(id) => void loadSelectedBook(id)}
                   onRunScan={() => void handleRunScan()}
                   onNavigateTab={(tab) => setActiveTab(tab)}
@@ -277,6 +524,7 @@ export default function App() {
                   bookLoading={bookLoading}
                   bookError={bookError}
                   scanning={scanning}
+                  canRunScans={authUser.permissions.can_run_scans}
                   onSelectMarket={(id) => void loadSelectedBook(id)}
                   onRunCustomScan={(params) => void handleRunScan(params)}
                 />
@@ -294,6 +542,7 @@ export default function App() {
                   pairs={crossPairs}
                   crossOpportunities={crossOpps}
                   blotter={paperBlotter}
+                  permissions={authUser.permissions}
                   onRefreshKalshi={loadKalshiMarkets}
                   onRefreshCrossVenue={async () => {
                     await Promise.all([loadCrossVenueAndBlotter(), loadAll(false)]);
@@ -305,6 +554,7 @@ export default function App() {
                 <IntelligenceCenterView
                   data={intelligenceData}
                   loading={intelligenceLoading}
+                  permissions={authUser.permissions}
                   onRefresh={async () => {
                     await Promise.all([loadIntelligenceCenter(), loadAll(false)]);
                   }}
@@ -316,6 +566,7 @@ export default function App() {
                   policy={dashboard.risk_gate.policy}
                   killSwitch={dashboard.risk_gate.kill_switch}
                   audits={dashboard.recent_audits}
+                  permissions={authUser.permissions}
                   onToggleKillSwitch={handleToggleKillSwitch}
                   onEvaluateDryRun={handleEvaluateDryRun}
                 />
@@ -325,6 +576,7 @@ export default function App() {
                 <MemoryArchitectureView
                   memories={dashboard.recent_memories}
                   modules={dashboard.modules}
+                  permissions={authUser.permissions}
                   onCreateMemory={handleCreateMemory}
                 />
               ) : null}
@@ -332,6 +584,115 @@ export default function App() {
           ) : null}
         </main>
       </div>
+
+      {/* Change Password Modal */}
+      {showChangePassword ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="change-password-title"
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+        >
+          <div className="w-full max-w-md border border-slate-700 bg-[#111827] rounded-xl p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h2 id="change-password-title" className="text-sm font-semibold text-slate-100">
+                  Change Account Password
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Principal: <span className="font-mono text-slate-200">{authUser.username}</span> ({authUser.role})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowChangePassword(false)}
+                aria-label="Close password modal"
+                className="text-slate-400 hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {passwordError ? (
+              <div role="alert" className="p-3 rounded-lg bg-rose-950/40 border border-rose-800 text-xs text-rose-200">
+                {passwordError}
+              </div>
+            ) : null}
+
+            {passwordSuccess ? (
+              <div role="status" className="p-3 rounded-lg bg-emerald-950/40 border border-emerald-800 text-xs text-emerald-200">
+                {passwordSuccess}
+              </div>
+            ) : null}
+
+            <form onSubmit={(e) => void handleChangePassword(e)} className="space-y-3 text-xs">
+              <div>
+                <label htmlFor="cp-current" className="block text-slate-300 mb-1">
+                  Current Password
+                </label>
+                <input
+                  id="cp-current"
+                  type="password"
+                  required
+                  autoComplete="current-password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="cp-new" className="block text-slate-300 mb-1">
+                  New Password (min 12 chars, 3 char classes)
+                </label>
+                <input
+                  id="cp-new"
+                  type="password"
+                  required
+                  minLength={12}
+                  autoComplete="new-password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="cp-confirm" className="block text-slate-300 mb-1">
+                  Confirm New Password
+                </label>
+                <input
+                  id="cp-confirm"
+                  type="password"
+                  required
+                  minLength={12}
+                  autoComplete="new-password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowChangePassword(false)}
+                  className="px-3 py-2 text-xs font-medium text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg"
+                >
+                  Close
+                </button>
+                <button
+                  type="submit"
+                  disabled={passwordBusy}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-60 rounded-lg"
+                >
+                  {passwordBusy ? 'Updating...' : 'Update Password'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

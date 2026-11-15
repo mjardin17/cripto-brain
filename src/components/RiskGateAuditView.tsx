@@ -4,6 +4,7 @@ import type {
   RiskAuditEntry,
   RiskEvalResponse,
   RiskPolicyConfig,
+  UserPermissions,
 } from '../types/certainty';
 import {
   formatPct,
@@ -18,6 +19,7 @@ interface RiskGateAuditViewProps {
   policy: RiskPolicyConfig;
   killSwitch: KillSwitchState;
   audits: RiskAuditEntry[];
+  permissions?: UserPermissions;
   onToggleKillSwitch: (active: boolean, reason: string) => Promise<void>;
   onEvaluateDryRun: (payload: RiskDryRunFormState) => Promise<RiskEvalResponse>;
 }
@@ -26,9 +28,12 @@ export function RiskGateAuditView({
   policy,
   killSwitch,
   audits,
+  permissions,
   onToggleKillSwitch,
   onEvaluateDryRun,
 }: RiskGateAuditViewProps) {
+  const canToggleKillSwitch = permissions?.can_toggle_kill_switch ?? true;
+  const canEvaluateDryRun = permissions?.can_evaluate_risk_dry_run ?? true;
   const [ksReason, setKsReason] = useState('Operator risk control verification');
   const [ksSubmitting, setKsSubmitting] = useState(false);
 
@@ -102,9 +107,10 @@ export function RiskGateAuditView({
 
           <button
             type="button"
-            disabled={ksSubmitting || ksReason.trim().length < 3}
+            disabled={ksSubmitting || ksReason.trim().length < 3 || !canToggleKillSwitch}
+            title={canToggleKillSwitch ? 'Toggle global kill switch' : 'Requires OWNER role'}
             onClick={handleKillSwitch}
-            className={`w-full px-4 py-2.5 text-xs font-semibold rounded-lg transition-colors disabled:opacity-60 ${
+            className={`w-full px-4 py-2.5 text-xs font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
               killSwitch.active
                 ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
                 : 'bg-rose-600 hover:bg-rose-500 text-white'
@@ -112,9 +118,11 @@ export function RiskGateAuditView({
           >
             {ksSubmitting
               ? 'Updating Kill Switch...'
-              : killSwitch.active
-                ? 'Deactivate Kill Switch'
-                : 'Activate Emergency Kill Switch'}
+              : !canToggleKillSwitch
+                ? 'Kill Switch Locked (OWNER Required)'
+                : killSwitch.active
+                  ? 'Deactivate Kill Switch'
+                  : 'Activate Emergency Kill Switch'}
           </button>
         </section>
 
@@ -278,10 +286,11 @@ export function RiskGateAuditView({
           </div>
           <button
             type="submit"
-            disabled={evaluating}
-            className="px-4 py-2 font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-60 rounded-lg transition-colors h-[34px]"
+            disabled={evaluating || !canEvaluateDryRun}
+            title={canEvaluateDryRun ? 'Run Risk Gate evaluation' : 'Requires ANALYST role or higher'}
+            className="px-4 py-2 font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors h-[34px]"
           >
-            {evaluating ? 'Evaluating...' : 'Evaluate Risk Gate'}
+            {evaluating ? 'Evaluating...' : !canEvaluateDryRun ? 'Read-Only' : 'Evaluate Risk Gate'}
           </button>
         </form>
 

@@ -27,6 +27,7 @@ interface CommandCenterViewProps {
   onSelectMarket: (marketId: string) => void;
   onRunScan: () => void;
   onNavigateTab: (tab: 'risk' | 'scanner' | 'cross_venue' | 'architecture') => void;
+  canRunScans?: boolean;
 }
 
 export function CommandCenterView({
@@ -40,6 +41,7 @@ export function CommandCenterView({
   onSelectMarket,
   onRunScan,
   onNavigateTab,
+  canRunScans = true,
 }: CommandCenterViewProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMode, setFilterMode] = useState<OpportunityFilter>('ALL');
@@ -195,8 +197,9 @@ export function CommandCenterView({
             <button
               type="button"
               onClick={onRunScan}
-              disabled={scanning}
-              className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-60 rounded-lg transition-colors"
+              disabled={scanning || !canRunScans}
+              title={canRunScans ? 'Scan Polymarket CLOB' : 'Requires OPERATOR or OWNER role'}
+              className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
             >
               {scanning ? 'Scanning CLOB V2...' : 'Scan Polymarket CLOB'}
             </button>

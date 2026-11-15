@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  canAccessWorkspaceTab,
   computeBudgetUtilizationPct,
   describeProvenance,
+  describeUserRole,
   filterOpportunities,
   formatDurationSeconds,
   formatPct,
@@ -11,7 +13,10 @@ import {
   formatScoreMetric,
   formatUsd,
   getRiskDryRunPreset,
+  hasRoleAtLeast,
+  parseApiJsonResponse,
   summarizeAgentTaskStatus,
+  summarizeAuditOutcome,
   summarizeExecutionOutcome,
   summarizeValidationStatus,
 } from './formatters';
@@ -123,5 +128,40 @@ test('Stage 3E provenance labels, duration formatter, and validation status help
   assert.equal(summarizeValidationStatus('REJECTED_INJECTION').toneClass, 'text-rose-400');
   assert.equal(summarizeValidationStatus('VERIFIED').toneClass, 'text-emerald-400');
   assert.equal(summarizeValidationStatus('STOPPED_EARLY').toneClass, 'text-amber-400');
+});
+
+test('Stage 4A RBAC role hierarchy, workspace access, and audit formatters fail closed', () => {
+  assert.equal(hasRoleAtLeast('OWNER', 'OWNER'), true);
+  assert.equal(hasRoleAtLeast('OPERATOR', 'OWNER'), false);
+  assert.equal(hasRoleAtLeast('OPERATOR', 'ANALYST'), true);
+  assert.equal(hasRoleAtLeast('ANALYST', 'OPERATOR'), false);
+  assert.equal(hasRoleAtLeast('READ_ONLY', 'READ_ONLY'), true);
+  assert.equal(hasRoleAtLeast(null, 'READ_ONLY'), false);
+
+  assert.equal(canAccessWorkspaceTab('OWNER', 'access'), true);
+  assert.equal(canAccessWorkspaceTab('OPERATOR', 'access'), false);
+  assert.equal(canAccessWorkspaceTab('ANALYST', 'command'), true);
+  assert.equal(canAccessWorkspaceTab(undefined, 'command'), false);
+
+  assert.equal(describeUserRole('OWNER').label, 'OWNER');
+  assert.equal(describeUserRole('READ_ONLY').label, 'READ ONLY');
+  assert.equal(summarizeAuditOutcome('DENIED').toneClass, 'text-rose-400');
+  assert.equal(summarizeAuditOutcome('SUCCESS').toneClass, 'text-emerald-400');
+});
+
+test('parseApiJsonResponse handles HTML warmup/error responses cleanly without crashing JSON parse', () => {
+  const warmup = parseApiJsonResponse('<!doctype html><html><title>Starting Server...</title></html>', 'text/html', true, 200);
+  assert.equal(warmup.ok, false);
+  assert.equal(warmup.status, 503);
+  assert.match(warmup.errorDetail ?? '', /HTML instead of JSON/);
+
+  const errHtml = parseApiJsonResponse('<!doctype html><html>503</html>', 'text/html', false, 503);
+  assert.equal(errHtml.ok, false);
+  assert.equal(errHtml.status, 503);
+  assert.match(errHtml.errorDetail ?? '', /HTTP 503 HTML/);
+
+  const validJson = parseApiJsonResponse('{"authenticated":false,"needs_owner_bootstrap":true}', 'application/json', true, 200);
+  assert.equal(validJson.ok, true);
+  assert.deepEqual(validJson.data, { authenticated: false, needs_owner_bootstrap: true });
 });
 

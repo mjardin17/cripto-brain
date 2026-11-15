@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from backend.arbitrage.calculator import normalize_clob_book
 from backend.execution.paper_simulator import PaperExecutionEngine, PaperExecutionRequest
 from backend.main import create_app
+from backend.tests.auth_helpers import authenticate_test_client
 from backend.risk_gate.engine import DeterministicRiskGate
 from backend.risk_gate.policy import RiskPolicy
 from backend.storage.duckdb_store import DuckDBStore, utc_now_iso
@@ -350,6 +351,7 @@ def test_daily_loss_limit_and_venue_exposure_caps_block_paper_execution():
 def test_fastapi_cross_venue_and_paper_blotter_routes():
     app = create_app(db_path=":memory:")
     with TestClient(app) as client:
+        authenticate_test_client(client)
         # Swap network clients on app.state with deterministic test stubs
         app.state.poly_client = _StubPolyClient()
         app.state.kalshi_client = _StubKalshiClient()

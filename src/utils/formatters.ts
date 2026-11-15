@@ -272,3 +272,123 @@ export function summarizeValidationStatus(status: string): {
   }
 }
 
+export const ROLE_LEVELS: Record<'READ_ONLY' | 'ANALYST' | 'OPERATOR' | 'OWNER', number> = {
+  READ_ONLY: 10,
+  ANALYST: 20,
+  OPERATOR: 30,
+  OWNER: 40,
+};
+
+export function hasRoleAtLeast(
+  role: 'READ_ONLY' | 'ANALYST' | 'OPERATOR' | 'OWNER' | null | undefined,
+  minRole: 'READ_ONLY' | 'ANALYST' | 'OPERATOR' | 'OWNER'
+): boolean {
+  if (!role) return false;
+  return (ROLE_LEVELS[role] ?? 0) >= ROLE_LEVELS[minRole];
+}
+
+export function canAccessWorkspaceTab(
+  role: 'READ_ONLY' | 'ANALYST' | 'OPERATOR' | 'OWNER' | null | undefined,
+  tab: string
+): boolean {
+  if (!role) return false;
+  if (tab === 'access') {
+    return role === 'OWNER';
+  }
+  return hasRoleAtLeast(role, 'READ_ONLY');
+}
+
+export function describeUserRole(role: string): {
+  label: string;
+  toneClass: string;
+} {
+  switch (role) {
+    case 'OWNER':
+      return { label: 'OWNER', toneClass: 'text-amber-300 border-amber-700/70 bg-amber-950/30' };
+    case 'OPERATOR':
+      return { label: 'OPERATOR', toneClass: 'text-sky-300 border-sky-700/70 bg-sky-950/30' };
+    case 'ANALYST':
+      return { label: 'ANALYST', toneClass: 'text-emerald-300 border-emerald-700/70 bg-emerald-950/30' };
+    case 'READ_ONLY':
+    default:
+      return { label: 'READ ONLY', toneClass: 'text-slate-300 border-slate-700 bg-slate-800/70' };
+  }
+}
+
+export function summarizeAuditOutcome(outcome: string): {
+  label: string;
+  toneClass: string;
+} {
+  switch (outcome.toUpperCase()) {
+    case 'SUCCESS':
+      return { label: 'SUCCESS', toneClass: 'text-emerald-400' };
+    case 'DENIED':
+      return { label: 'DENIED', toneClass: 'text-rose-400' };
+    default:
+      return { label: outcome.toUpperCase(), toneClass: 'text-amber-400' };
+  }
+}
+
+export interface ParsedApiResponse {
+  ok: boolean;
+  status: number;
+  data: unknown | null;
+  errorDetail: string | null;
+}
+
+export function parseApiJsonResponse(
+  rawText: string,
+  contentType: string,
+  ok: boolean,
+  status: number
+): ParsedApiResponse {
+  const ct = (contentType || '').toLowerCase();
+  const trimmed = (rawText || '').trimStart();
+  const looksLikeHtml =
+    ct.includes('text/html') ||
+    trimmed.startsWith('<!') ||
+    trimmed.toLowerCase().startsWith('<html');
+
+  let parsedBody: unknown = null;
+  if (!looksLikeHtml && trimmed.length > 0) {
+    try {
+      parsedBody = JSON.parse(rawText);
+    } catch {
+      parsedBody = null;
+    }
+  }
+
+  if (!ok) {
+    let detail = `HTTP ${status}`;
+    if (parsedBody && typeof parsedBody === 'object') {
+      const obj = parsedBody as Record<string, unknown>;
+      if (typeof obj.detail === 'string' && obj.detail) detail = obj.detail;
+      else if (typeof obj.error === 'string' && obj.error) detail = obj.error;
+    } else if (looksLikeHtml) {
+      detail = `Backend API returned HTTP ${status} HTML instead of JSON. FastAPI backend may be starting or unavailable.`;
+    }
+    return { ok: false, status, data: null, errorDetail: detail };
+  }
+
+  if (looksLikeHtml) {
+    return {
+      ok: false,
+      status: 503,
+      data: null,
+      errorDetail:
+        'Backend service is still starting or unreachable (proxy returned HTML instead of JSON).',
+    };
+  }
+
+  if (parsedBody === null) {
+    return {
+      ok: false,
+      status: 502,
+      data: null,
+      errorDetail: 'Backend returned empty or invalid JSON response.',
+    };
+  }
+
+  return { ok: true, status, data: parsedBody, errorDetail: null };
+}
+

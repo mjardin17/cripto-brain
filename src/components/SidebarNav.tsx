@@ -1,4 +1,14 @@
-import { Activity, ArrowLeftRight, BookOpen, BrainCircuit, Layers, ShieldAlert } from 'lucide-react';
+import {
+  Activity,
+  ArrowLeftRight,
+  BookOpen,
+  BrainCircuit,
+  KeyRound,
+  Layers,
+  ShieldAlert,
+} from 'lucide-react';
+import type { AuthenticatedUserRecord } from '../types/certainty';
+import { canAccessWorkspaceTab, describeUserRole } from '../utils/formatters';
 
 export type WorkspaceTab =
   | 'command'
@@ -6,7 +16,8 @@ export type WorkspaceTab =
   | 'cross_venue'
   | 'intelligence'
   | 'risk'
-  | 'architecture';
+  | 'architecture'
+  | 'access';
 
 interface SidebarNavProps {
   activeTab: WorkspaceTab;
@@ -14,6 +25,7 @@ interface SidebarNavProps {
   killSwitchActive: boolean;
   auditsCount: number;
   opportunitiesCount: number;
+  user: AuthenticatedUserRecord;
 }
 
 const NAV_ITEMS: Array<{
@@ -58,6 +70,12 @@ const NAV_ITEMS: Array<{
     subtitle: 'Phase 0 audit & Tier 2/3 stubs',
     Icon: BookOpen,
   },
+  {
+    id: 'access',
+    label: 'Access & Security',
+    subtitle: 'Users, RBAC, sessions & audit',
+    Icon: KeyRound,
+  },
 ];
 
 export function SidebarNav({
@@ -66,7 +84,11 @@ export function SidebarNav({
   killSwitchActive,
   auditsCount,
   opportunitiesCount,
+  user,
 }: SidebarNavProps) {
+  const visibleItems = NAV_ITEMS.filter((item) => canAccessWorkspaceTab(user.role, item.id));
+  const roleBadge = describeUserRole(user.role);
+
   return (
     <aside className="w-full lg:w-64 shrink-0 border-b lg:border-b-0 lg:border-r border-slate-800 bg-[#0E1522] flex flex-col justify-between">
       <div className="p-4 lg:p-5">
@@ -76,7 +98,7 @@ export function SidebarNav({
               The Certainty Stack
             </div>
             <div className="mt-0.5 lg:mt-1 text-xs text-slate-400">
-              Phase 3 · Research + Paper Sim
+              Phase 4A · Authenticated Research
             </div>
           </div>
           <span
@@ -92,7 +114,7 @@ export function SidebarNav({
           className="mt-3 lg:mt-5 flex lg:flex-col gap-1.5 overflow-x-auto lg:overflow-visible pb-1 lg:pb-0"
           aria-label="Primary workspace navigation"
         >
-          {NAV_ITEMS.map(({ id, label, subtitle, Icon }) => {
+          {visibleItems.map(({ id, label, subtitle, Icon }) => {
             const active = activeTab === id;
             return (
               <button
@@ -118,6 +140,15 @@ export function SidebarNav({
       </div>
 
       <div className="hidden lg:block p-5 border-t border-slate-800/80 space-y-3 text-xs">
+        <div className="p-2.5 rounded-lg bg-[#0B111B] border border-slate-800 flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="font-mono font-semibold text-slate-100 truncate">{user.username}</div>
+            <div className="text-[11px] text-slate-500 truncate">Session {user.session_id}</div>
+          </div>
+          <span className={`px-2 py-0.5 rounded border text-[10px] font-mono font-semibold shrink-0 ${roleBadge.toneClass}`}>
+            {roleBadge.label}
+          </span>
+        </div>
         <div className="flex items-center justify-between text-slate-400">
           <span>Execution Lock</span>
           <span className="font-mono text-slate-200">READ-ONLY</span>

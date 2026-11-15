@@ -17,6 +17,7 @@ interface ScannerViewProps {
     target_shares: number;
     slippage_buffer_bps: number;
   }) => void;
+  canRunScans?: boolean;
 }
 
 export function ScannerView({
@@ -28,6 +29,7 @@ export function ScannerView({
   scanning,
   onSelectMarket,
   onRunCustomScan,
+  canRunScans = true,
 }: ScannerViewProps) {
   const [limit, setLimit] = useState(12);
   const [targetShares, setTargetShares] = useState(25);
@@ -106,8 +108,9 @@ export function ScannerView({
 
           <button
             type="submit"
-            disabled={scanning}
-            className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-60 rounded-lg transition-colors h-[34px]"
+            disabled={scanning || !canRunScans}
+            title={canRunScans ? 'Execute live Polymarket CLOB scan' : 'Requires OPERATOR or OWNER role'}
+            className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors h-[34px]"
           >
             {scanning ? 'Scanning Live Books...' : 'Execute Research Scan'}
           </button>

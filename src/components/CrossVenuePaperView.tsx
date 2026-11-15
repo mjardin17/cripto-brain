@@ -10,6 +10,7 @@ import type {
   PaperBlotterResponse,
   PaperExecuteResponse,
   PaperExecutionScenario,
+  UserPermissions,
 } from '../types/certainty';
 import {
   formatPct,
@@ -28,6 +29,7 @@ interface CrossVenuePaperViewProps {
   pairs: CrossVenuePairRecord[];
   crossOpportunities: CrossVenueOpportunityRecord[];
   blotter: PaperBlotterResponse | null;
+  permissions?: UserPermissions;
   onRefreshKalshi: () => Promise<void>;
   onRefreshCrossVenue: () => Promise<void>;
 }
@@ -41,9 +43,12 @@ export function CrossVenuePaperView({
   pairs,
   crossOpportunities,
   blotter,
+  permissions,
   onRefreshKalshi,
   onRefreshCrossVenue,
 }: CrossVenuePaperViewProps) {
+  const canManagePairs = permissions?.can_manage_pairs ?? true;
+  const canExecutePaper = permissions?.can_execute_paper_trades ?? true;
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [kalshiBook, setKalshiBook] = useState<KalshiBookSnapshotResponse | null>(null);
   const [kalshiBookLoading, setKalshiBookLoading] = useState(false);
@@ -482,10 +487,15 @@ export function CrossVenuePaperView({
 
           <button
             type="submit"
-            disabled={registerBusy}
-            className="w-full px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-60 rounded-lg transition-colors"
+            disabled={registerBusy || !canManagePairs}
+            title={canManagePairs ? 'Verify settlement equivalence & register pair' : 'Requires OPERATOR or OWNER role'}
+            className="w-full px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
           >
-            {registerBusy ? 'Verifying Settlement Rules...' : 'Verify & Register Contract Pair'}
+            {registerBusy
+              ? 'Verifying Settlement Rules...'
+              : !canManagePairs
+                ? 'Pair Registration Locked (OPERATOR Required)'
+                : 'Verify & Register Contract Pair'}
           </button>
 
           {registerResult ? (
@@ -576,8 +586,9 @@ export function CrossVenuePaperView({
               <button
                 type="button"
                 onClick={() => void handleScanCrossVenue()}
-                disabled={scanBusy}
-                className="px-3 py-1.5 font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap"
+                disabled={scanBusy || !canManagePairs}
+                title={canManagePairs ? 'Scan registered pairs' : 'Requires OPERATOR or OWNER role'}
+                className="px-3 py-1.5 font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors whitespace-nowrap"
               >
                 {scanBusy ? 'Scanning...' : 'Scan Pairs'}
               </button>
@@ -638,10 +649,15 @@ export function CrossVenuePaperView({
                           <button
                             type="button"
                             onClick={() => void handleExecutePaper(p.pair_id)}
-                            disabled={execBusyPair === p.pair_id}
-                            className="px-3 py-1.5 font-semibold text-xs text-amber-100 bg-amber-700/80 hover:bg-amber-600 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap"
+                            disabled={execBusyPair === p.pair_id || !canExecutePaper}
+                            title={canExecutePaper ? 'Execute Risk-Gate-checked paper simulation' : 'Requires OPERATOR or OWNER role'}
+                            className="px-3 py-1.5 font-semibold text-xs text-amber-100 bg-amber-700/80 hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors whitespace-nowrap"
                           >
-                            {execBusyPair === p.pair_id ? 'Running...' : 'Simulate Paper Trade'}
+                            {execBusyPair === p.pair_id
+                              ? 'Running...'
+                              : !canExecutePaper
+                                ? 'Operator Required'
+                                : 'Simulate Paper Trade'}
                           </button>
                         </td>
                       </tr>

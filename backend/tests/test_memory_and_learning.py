@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from backend.intelligence.learning_engine import LearningEngine
 from backend.intelligence.memory_manager import StructuredMemoryManager
 from backend.main import create_app
+from backend.tests.auth_helpers import authenticate_test_client
 from backend.storage.duckdb_store import DuckDBStore
 
 
@@ -436,6 +437,7 @@ def test_stage3b_api_endpoints_and_safety_invariants(tmp_path):
     db_file = tmp_path / "stage3b_api.duckdb"
     app = create_app(db_path=str(db_file))
     with TestClient(app) as client:
+        authenticate_test_client(client)
         # Phase 0 backfill exposed cleanly via structured memory endpoint
         resp = client.get("/api/memory/structured?q=Polymarket")
         assert resp.status_code == 200

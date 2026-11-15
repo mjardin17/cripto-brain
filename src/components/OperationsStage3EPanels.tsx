@@ -9,7 +9,11 @@ import {
   Timer,
 } from 'lucide-react';
 import { certaintyApi } from '../api/client';
-import type { IntelligenceCommandCenterPayload, SoakMode } from '../types/certainty';
+import type {
+  IntelligenceCommandCenterPayload,
+  SoakMode,
+  UserPermissions,
+} from '../types/certainty';
 import {
   formatDurationSeconds,
   formatProbPct,
@@ -23,14 +27,18 @@ import { ProvenanceLabel } from './ProvenanceLabel';
 interface OperationsStage3EPanelsProps {
   data: IntelligenceCommandCenterPayload;
   busyAction: string | null;
+  permissions?: UserPermissions;
   runAction: (key: string, fn: () => Promise<string>) => Promise<void>;
 }
 
 export function OperationsStage3EPanels({
   data,
   busyAction,
+  permissions,
   runAction,
 }: OperationsStage3EPanelsProps) {
+  const canRunLabs = permissions?.can_run_validation_labs ?? true;
+  const canSubmitResearch = permissions?.can_submit_research ?? true;
   const [soakMode, setSoakMode] = useState<SoakMode>('SHORT_VALIDATION');
   const [shortDurationSec, setShortDurationSec] = useState<string>('20');
 
@@ -217,7 +225,8 @@ export function OperationsStage3EPanels({
             ) : null}
             <button
               type="button"
-              disabled={busyAction !== null || activeSoak !== null}
+              disabled={busyAction !== null || activeSoak !== null || !canRunLabs}
+              title={canRunLabs ? 'Start controlled soak/validation run' : 'Requires OPERATOR or OWNER role'}
               onClick={() =>
                 void runAction('soak-start', async () => {
                   const res = await certaintyApi.startSoakRun({
@@ -229,7 +238,7 @@ export function OperationsStage3EPanels({
                   return `Started ${res.run_id} (${res.mode} · label=${res.run_label} · target=${formatDurationSeconds(res.duration_target_seconds)}).`;
                 })
               }
-              className="px-3 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white rounded-lg inline-flex items-center gap-1.5"
+              className="px-3 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg inline-flex items-center gap-1.5"
             >
               <Play className="w-3.5 h-3.5" />
               Start Validation Run
@@ -237,7 +246,8 @@ export function OperationsStage3EPanels({
             {activeSoak ? (
               <button
                 type="button"
-                disabled={busyAction !== null}
+                disabled={busyAction !== null || !canRunLabs}
+                title={canRunLabs ? 'Stop active soak run' : 'Requires OPERATOR or OWNER role'}
                 onClick={() =>
                   void runAction('soak-stop', async () => {
                     const res = await certaintyApi.stopSoakRun({
@@ -247,7 +257,7 @@ export function OperationsStage3EPanels({
                     return `Stopped ${res.run_id} -> status=${res.status} (${formatDurationSeconds(res.elapsed_seconds)} elapsed).`;
                   })
                 }
-                className="px-3 py-1.5 font-semibold bg-amber-600 hover:bg-amber-500 text-white rounded-lg inline-flex items-center gap-1.5"
+                className="px-3 py-1.5 font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg inline-flex items-center gap-1.5"
               >
                 <Square className="w-3.5 h-3.5" />
                 Stop Active
@@ -312,7 +322,8 @@ export function OperationsStage3EPanels({
             </div>
             <button
               type="button"
-              disabled={busyAction !== null}
+              disabled={busyAction !== null || !canRunLabs}
+              title={canRunLabs ? 'Run multi-agent concurrency stress suite' : 'Requires OPERATOR or OWNER role'}
               onClick={() =>
                 void runAction('conc-stress', async () => {
                   const res = await certaintyApi.runConcurrencyStress({
@@ -322,7 +333,7 @@ export function OperationsStage3EPanels({
                   return `Concurrency stress ${res.stress_id} -> ${res.status} (${res.successful_claims}/${res.total_claims_attempted} claims, ${res.recovery_successes} recoveries, ${res.throughput_tasks_per_sec} tasks/s).`;
                 })
               }
-              className="px-3 py-1.5 text-xs font-semibold bg-sky-600 hover:bg-sky-500 text-white rounded-lg"
+              className="px-3 py-1.5 text-xs font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg"
             >
               Run Stress Suite
             </button>
@@ -527,7 +538,8 @@ export function OperationsStage3EPanels({
               />
               <button
                 type="button"
-                disabled={busyAction !== null}
+                disabled={busyAction !== null || !canSubmitResearch}
+                title={canSubmitResearch ? 'Validate research submission' : 'Requires ANALYST role or higher'}
                 onClick={() =>
                   void runAction('val-research', async () => {
                     const nowIso = new Date().toISOString();
@@ -543,7 +555,7 @@ export function OperationsStage3EPanels({
                     return `Research validation ${res.validation_id} -> ${res.verification_status} (${res.findings.length} findings).`;
                   })
                 }
-                className="px-3 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 text-white rounded-lg"
+                className="px-3 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg"
               >
                 Validate Research
               </button>
@@ -657,7 +669,8 @@ export function OperationsStage3EPanels({
               />
               <button
                 type="button"
-                disabled={busyAction !== null}
+                disabled={busyAction !== null || !canSubmitResearch}
+                title={canSubmitResearch ? 'Run adversarial challenge' : 'Requires ANALYST role or higher'}
                 onClick={() =>
                   void runAction('adv-review', async () => {
                     const res = await certaintyApi.runAdversarialReview({
@@ -684,7 +697,7 @@ export function OperationsStage3EPanels({
                     return `Adversarial review ${res.review_id} (${res.arbiter_agent}) -> ${res.verdict}.`;
                   })
                 }
-                className="px-3 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 text-white rounded-lg whitespace-nowrap"
+                className="px-3 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg whitespace-nowrap"
               >
                 Challenge Claim
               </button>
@@ -753,14 +766,15 @@ export function OperationsStage3EPanels({
             />
             <button
               type="button"
-              disabled={busyAction !== null}
+              disabled={busyAction !== null || !canRunLabs}
+              title={canRunLabs ? 'Run 12-scenario paper stress lab' : 'Requires OPERATOR or OWNER role'}
               onClick={() =>
                 void runAction('paper-stress', async () => {
                   const res = await certaintyApi.runPaperStress({ target_shares: 25 });
                   return `Executed ${res.scenarios_executed} SIMULATED scenarios: ${res.approved_count} approved, ${res.rejected_count} Risk-Gate denied (${res.risk_gate_rejection_rate_pct}%), unwind loss=${formatUsd(res.total_unwind_loss_usd, 4)}.`;
                 })
               }
-              className="px-3 py-1.5 text-xs font-semibold bg-amber-600 hover:bg-amber-500 text-white rounded-lg"
+              className="px-3 py-1.5 text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg"
             >
               Run 12-Scenario Paper Stress
             </button>

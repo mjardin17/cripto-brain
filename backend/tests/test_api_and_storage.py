@@ -9,6 +9,7 @@ os.environ["CERTAINTY_DUCKDB_PATH"] = ":memory:"
 from fastapi.testclient import TestClient
 
 from backend.main import create_app
+from backend.tests.auth_helpers import authenticate_test_client
 from backend.venues.polymarket import parse_gamma_binary_market
 
 
@@ -47,6 +48,7 @@ def test_fastapi_risk_gate_and_kill_switch_persistence(tmp_path):
     db_file = tmp_path / "test_certainty.duckdb"
     app = create_app(db_path=str(db_file))
     with TestClient(app) as client:
+        authenticate_test_client(client)
         h = client.get("/api/health?probe_venues=false")
         assert h.status_code == 200
         body = h.json()
