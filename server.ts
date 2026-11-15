@@ -1,4 +1,7 @@
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 import fs from 'node:fs';
 import path from 'node:path';
 import express, { type Request, type Response } from 'express';
@@ -11,12 +14,12 @@ const FASTAPI_ORIGIN = `http://${FASTAPI_HOST}:${FASTAPI_PORT}`;
 let pythonProc: ChildProcess | null = null;
 let shuttingDown = false;
 
-function pythonHasBackendDeps(pythonBin: string): boolean {
+async function pythonHasBackendDeps(pythonBin: string): Promise<boolean> {
   try {
-    execFileSync(
+    await execFileAsync(
       pythonBin,
       ['-c', 'import uvicorn, fastapi, duckdb, argon2, httpx, pydantic, itsdangerous'],
-      { cwd: process.cwd(), stdio: 'ignore', timeout: 10000 }
+      { cwd: process.cwd(), timeout: 10000, maxBuffer: 1024 * 1024, windowsHide: true }
     );
     return true;
   } catch {
@@ -24,33 +27,35 @@ function pythonHasBackendDeps(pythonBin: string): boolean {
   }
 }
 
-function ensurePythonEnvironment(): string {
+async function ensurePythonEnvironment(): Promise<string> {
   const venvPython = path.resolve(process.cwd(), '.venv/bin/python');
-  if (fs.existsSync(venvPython) && pythonHasBackendDeps(venvPython)) {
+  if (fs.existsSync(venvPython) && await pythonHasBackendDeps(venvPython)) {
     return venvPython;
   }
-  if (pythonHasBackendDeps('python3')) {
+  if (await pythonHasBackendDeps('python3')) {
     return 'python3';
   }
   const reqFile = path.resolve(process.cwd(), 'requirements.txt');
   console.log('[server] Python backend dependencies missing; bootstrapping .venv from requirements.txt...');
   if (!fs.existsSync(venvPython)) {
-    execFileSync('python3', ['-m', 'venv', '.venv'], {
+    await execFileAsync('python3', ['-m', 'venv', '.venv'], {
       cwd: process.cwd(),
-      stdio: 'inherit',
       timeout: 120000,
+      maxBuffer: 5 * 1024 * 1024,
+      windowsHide: true,
     });
   }
-  execFileSync(venvPython, ['-m', 'pip', 'install', '-q', '-r', reqFile], {
+  await execFileAsync(venvPython, ['-m', 'pip', 'install', '-q', '-r', reqFile], {
     cwd: process.cwd(),
-    stdio: 'inherit',
     timeout: 300000,
+    maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true,
   });
   return venvPython;
 }
 
-function startFastApiBackend(): void {
-  const pythonBin = ensurePythonEnvironment();
+async function startFastApiBackend(): Promise<void> {
+  const pythonBin = await ensurePythonEnvironment();
   pythonProc = spawn(
     pythonBin,
     [
@@ -85,7 +90,9 @@ function startFastApiBackend(): void {
       setTimeout(() => {
         if (!shuttingDown) {
           console.log('[fastapi] Restarting FastAPI backend...');
-          startFastApiBackend();
+          void startFastApiBackend().catch((err) => {
+            console.error('[fastapi] Backend restart bootstrap failed:', err);
+          });
         }
       }, 1500);
     }
@@ -230,8 +237,11 @@ async function main() {
   // Start the Python service only after the HTTP listener is bound. If dependency
   // bootstrap fails, Express remains available and /api requests return its JSON 503.
   try {
-    startFastApiBackend();
-    void waitForFastApi();
+    void startFastApiBackend()
+      .then(() => waitForFastApi())
+      .catch((err) => {
+        console.error('[server] FastAPI backend bootstrap failed; frontend remains available:', err);
+      });
   } catch (err) {
     console.error('[server] FastAPI backend bootstrap failed; frontend remains available:', err);
   }
