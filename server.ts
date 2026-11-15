@@ -183,9 +183,9 @@ async function proxyApiRequest(req: Request, res: Response): Promise<void> {
 }
 
 async function main() {
-  startFastApiBackend();
-  await waitForFastApi();
-
+  // Bind the public app port before Python dependency installation/backend startup.
+  // Hosting platforms may return an HTML warmup page when no process is listening;
+  // that HTML must never be mistaken for an API response.
   const app = express();
   app.disable('x-powered-by');
   if (process.env.CERTAINTY_TRUST_UPSTREAM_PROXY === 'true') {
@@ -226,6 +226,15 @@ async function main() {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[server] The Certainty Stack listening on http://0.0.0.0:${PORT}`);
   });
+
+  // Start the Python service only after the HTTP listener is bound. If dependency
+  // bootstrap fails, Express remains available and /api requests return its JSON 503.
+  try {
+    startFastApiBackend();
+    void waitForFastApi();
+  } catch (err) {
+    console.error('[server] FastAPI backend bootstrap failed; frontend remains available:', err);
+  }
 
   const shutdown = () => {
     shuttingDown = true;
