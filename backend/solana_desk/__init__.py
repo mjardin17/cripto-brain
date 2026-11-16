@@ -1,0 +1,1 @@
+"""Paper-first Solana memecoin research desk. No live wallet signer or transaction submitter."""
