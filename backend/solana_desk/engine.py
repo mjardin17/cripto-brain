@@ -17,6 +17,7 @@ class SolanaPaperDesk:
         self.positions: dict[str, PaperPosition] = {}
         self.events: list[DeskEvent] = []
         self._seen_mints: set[str] = set()
+        self._entered_mints: set[str] = set()
         self.live_trading_enabled = False
 
     def _log(self, agent: str, event: str, mint: str | None = None, **details) -> None:
@@ -61,7 +62,7 @@ class SolanaPaperDesk:
     def open_paper_position(self, candidate: Candidate, entry_price: float, notional_usd: float) -> PaperPosition:
         if self.live_trading_enabled:
             raise RuntimeError("Live trading is forbidden in this module")
-        if candidate.mint in self.positions or candidate.mint in self._seen_mints:
+        if candidate.mint in self._entered_mints or candidate.mint in self.positions:
             raise ValueError("Only one entry per mint is permitted")
         max_notional = calculate_position_notional(self.balance_usd, self.config)
         if not math.isfinite(entry_price) or entry_price <= 0:
@@ -75,13 +76,18 @@ class SolanaPaperDesk:
         self.balance_usd = round(self.balance_usd - notional_usd, 2)
         self.positions[candidate.mint] = position
         self._seen_mints.add(candidate.mint)
+        self._entered_mints.add(candidate.mint)
         self._log("EXECUTOR", "PAPER_BUY_FILLED", candidate.mint, entry_price=entry_price, notional_usd=notional_usd)
         return position
 
     def mark_positions(self, prices: dict[str, float]) -> list[dict]:
         outcomes: list[dict] = []
         for mint, position in list(self.positions.items()):
-            updated, exit_reason = update_position_risk(position, prices.get(mint, float("nan")), self.config)
+            mark_price = prices.get(mint)
+            if mark_price is None or not math.isfinite(mark_price) or mark_price <= 0:
+                self._log("RISK", "POSITION_MARK_UNAVAILABLE", mint)
+                continue
+            updated, exit_reason = update_position_risk(position, mark_price, self.config)
             if exit_reason is None:
                 self.positions[mint] = updated
                 continue
