@@ -1057,6 +1057,23 @@ class DuckDBStore:
                 items.append(item)
             return items
 
+    def delete_event_reactions_by_label_prefix(self, prefix: str) -> int:
+        """Remove recorded analogs whose event_label starts with prefix (test-data cleanup)."""
+        if not prefix:
+            return 0
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT COUNT(*) FROM event_reactions WHERE event_label LIKE ?",
+                [str(prefix) + "%"],
+            ).fetchone()
+            count = int(rows[0] or 0)
+            if count:
+                self._conn.execute(
+                    "DELETE FROM event_reactions WHERE event_label LIKE ?",
+                    [str(prefix) + "%"],
+                )
+        return count
+
     def save_council_session(self, session: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             self._conn.execute(

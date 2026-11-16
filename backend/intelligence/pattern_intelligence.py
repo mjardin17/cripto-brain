@@ -60,8 +60,8 @@ def record_event_reaction(
     mag = None
     if reaction_magnitude_pct is not None:
         mag = float(reaction_magnitude_pct)
-        if not (-100.0 <= mag <= 100.0):
-            raise ValueError("reaction_magnitude_pct must be within [-100, 100]")
+        if not (-500.0 <= mag <= 500.0):
+            raise ValueError("reaction_magnitude_pct must be within [-500, 500]")
     if len(narrative.strip()) < 10:
         raise ValueError("narrative must be at least 10 characters")
 

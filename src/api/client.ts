@@ -274,6 +274,12 @@ export const certaintyApi = {
       `/api/fluctuations/forecast?domain=${domain}&horizon_days=${horizonDays}`
     ),
 
+  importCuratedHistory: () =>
+    apiFetch<{ imported: number; skipped_duplicates: number; total_curated: number; purged_test_analogs: number }>(
+      '/api/patterns/import-curated',
+      { method: 'POST', body: JSON.stringify({}) }
+    ),
+
   getCrossVenueOpportunities: (limit = 100) =>
     apiFetch<{ count: number; items: CrossVenueOpportunityRecord[] }>(
       `/api/cross-venue/opportunities?limit=${limit}`

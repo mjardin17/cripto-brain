@@ -23,6 +23,24 @@ export function PatternIntelligencePanel({ canDispatchAgents }: PatternIntellige
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
+  const importCurated = async () => {
+    setBusy('curated');
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await certaintyApi.importCuratedHistory();
+      setMessage(
+        `Imported ${res.imported} curated real events (${res.skipped_duplicates} already present)` +
+          (res.purged_test_analogs ? ` and removed ${res.purged_test_analogs} test analogs.` : '.')
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Curated import failed');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   // Record form
   const [domain, setDomain] = useState<'STOCKS' | 'CRYPTO'>('CRYPTO');
   const [eventType, setEventType] = useState('NATURAL_DISASTER');
@@ -104,6 +122,15 @@ export function PatternIntelligencePanel({ canDispatchAgents }: PatternIntellige
           <div className="flex items-center gap-2.5">
             <h2 className="text-sm font-semibold text-slate-100">Event Pattern Intelligence</h2>
             <ProvenanceLabel provenance="SIMULATED" detail="Advisory · Brier-Scored Feedback Loop" />
+            <button
+              type="button"
+              onClick={() => void importCurated()}
+              disabled={busy !== null || !canDispatchAgents}
+              title={canDispatchAgents ? 'Import the curated set of real documented events' : 'Requires OPERATOR or OWNER role'}
+              className="px-2.5 py-1 rounded-md text-[11px] font-medium border border-slate-700 text-slate-300 hover:border-sky-600 hover:text-sky-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {busy === 'curated' ? 'Importing…' : 'Import real events'}
+            </button>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
             Record how markets reacted to past events (disasters, shocks, outages). When a similar

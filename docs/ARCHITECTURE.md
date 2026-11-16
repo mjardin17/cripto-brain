@@ -47,6 +47,7 @@
 │  │     ├── council.py           STOCKS/CRYPTO deliberation teams    │
 │  │     ├── pattern_intelligence Historical event analogs->predict  │
 │  │     ├── fluctuation_analyzer  Cause attribution + next-move timing  │
+│  │     ├── curated_history.py    Vetted real-event analog import      │
 │  │     └── cross_venue.py        Cross-venue route VWAP & scanner       │
 │  │                                                                      │
 │  ├── backend/execution/          Simulated Execution Engine             │

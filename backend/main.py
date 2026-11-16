@@ -31,6 +31,7 @@ from backend.intelligence.model_router import CostAwareModelRouter
 from backend.intelligence.operations import OperationalHealthMonitor, SoakMode, SoakTestManager
 from backend.intelligence.probability import ConfigGovernanceManager, ProbabilityIntelligenceEngine
 from backend.intelligence.council import COUNCIL_DOMAINS, convene_council, get_council_definition
+from backend.intelligence.curated_history import import_curated_history
 from backend.intelligence.fluctuation_analyzer import (
     analyze_fluctuation_drivers,
     forecast_next_fluctuations,
@@ -235,7 +236,7 @@ class EventReactionCreateRequest(BaseModel):
     narrative: str = Field(min_length=10, max_length=2000)
     asset_label: str | None = Field(default=None, max_length=80)
     market_label: str | None = Field(default=None, max_length=160)
-    reaction_magnitude_pct: float | None = Field(default=None, ge=-100, le=100)
+    reaction_magnitude_pct: float | None = Field(default=None, ge=-500, le=500)
     sources: list[str] = Field(default_factory=list, max_length=10)
     keywords: list[str] = Field(default_factory=list, max_length=20)
 
@@ -2104,6 +2105,15 @@ def create_app(
                 result["recorded_prediction_id"] = recorded["prediction_id"]
             except ValueError:
                 result["recorded_prediction_error"] = "Prediction recording failed validation"
+        return result
+
+    @app.post("/api/patterns/import-curated")
+    async def import_curated_history_endpoint(
+        _: AuthenticatedUser = Depends(operator_guard),
+    ) -> dict[str, Any]:
+        result = import_curated_history(store)
+        purged = store.delete_event_reactions_by_label_prefix("Hurricane Cat-5 landfall")
+        result["purged_test_analogs"] = purged
         return result
 
     @app.get("/api/fluctuations/analyze")

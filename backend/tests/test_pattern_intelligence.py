@@ -46,7 +46,7 @@ def test_record_and_list_event_reactions():
     for bad in (
         {"domain": "FOREX", **{k: v for k, v in _disaster_reaction(9, "DOWN", -1.0).items() if k != "domain"}},
         {"reaction_direction": "SIDEWAYS", **{k: v for k, v in _disaster_reaction(9, "DOWN", -1.0).items() if k != "reaction_direction"}},
-        {"reaction_magnitude_pct": -250.0, **{k: v for k, v in _disaster_reaction(9, "DOWN", -1.0).items() if k != "reaction_magnitude_pct"}},
+        {"reaction_magnitude_pct": -600.0, **{k: v for k, v in _disaster_reaction(9, "DOWN", -1.0).items() if k != "reaction_magnitude_pct"}},
     ):
         try:
             record_event_reaction(store, **bad)
