@@ -73,7 +73,7 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
             "USE_VERIFIED_RESEARCH_USER_AGENT",
         ),
         forbidden_actions=FORBIDDEN_GLOBAL_ACTIONS,
-        supports_task_types=("SCAN_POLYMARKET", "SCAN_CROSS_VENUE", "CHECK_FEED_HEALTH"),
+        supports_task_types=("SCAN_POLYMARKET", "SCAN_CROSS_VENUE", "CHECK_FEED_HEALTH", "COUNCIL_SESSION"),
     ),
     "ARBITRAGE_RESEARCH": AgentProfile(
         role="ARBITRAGE_RESEARCH",
@@ -100,7 +100,7 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
             "SUBMIT_LEARNING_CYCLE",
         ),
         forbidden_actions=FORBIDDEN_GLOBAL_ACTIONS,
-        supports_task_types=("CALIBRATE_PROBABILITY", "EVALUATE_FORECAST_CALIBRATION"),
+        supports_task_types=("CALIBRATE_PROBABILITY", "EVALUATE_FORECAST_CALIBRATION", "EVALUATE_EVENT_PATTERN"),
     ),
     "RISK_INTELLIGENCE": AgentProfile(
         role="RISK_INTELLIGENCE",
@@ -219,6 +219,35 @@ async def execute_agent_task(
                 "note": "Settlement verification remains strictly fail-closed.",
             }
 
+        if task_type == "COUNCIL_SESSION":
+            from backend.intelligence.council import convene_council
+
+            domain = str(payload.get("domain") or "").strip().upper()
+            if not domain:
+                raise ValueError("COUNCIL_SESSION payload requires a 'domain' (STOCKS or CRYPTO)")
+            topic = payload.get("topic")
+            session = convene_council(ctx.store, domain, topic=topic)
+            ctx.memory.record_candidate(
+                memory_tier="WORKING",
+                category="COUNCIL_SESSION",
+                title=f"{session['domain']} council verdict {session['verdict']}",
+                summary=f"{session['verdict_detail']['rationale']}",
+                source_agent=profile.agent_id,
+                evidence=[{"source_type": "COUNCIL_SESSION", "source_ref_id": session["session_id"]}],
+                confidence=0.75,
+                ttl_hours=12.0,
+            )
+            return {
+                "agent_id": profile.agent_id,
+                "council": session["domain"],
+                "session_id": session["session_id"],
+                "verdict": session["verdict"],
+                "confidence": session["confidence"],
+                "member_stances": session["member_stances"],
+                "advisory_only": True,
+                "live_trading_enabled": False,
+            }
+
     if role == "ARBITRAGE_RESEARCH":
         opps = ctx.store.list_opportunities(limit=50, latest_scan_only=False)
         approved = [o for o in opps if o.get("risk_gate_approved")]
@@ -241,6 +270,47 @@ async def execute_agent_task(
         }
 
     if role == "PROBABILITY_RESEARCH":
+        if task_type == "EVALUATE_EVENT_PATTERN":
+            from backend.intelligence.pattern_intelligence import (
+                analyze_event_pattern,
+                record_event_reaction,
+            )
+
+            action = str(payload.get("action") or "ANALYZE").upper()
+            if action == "RECORD":
+                reaction = record_event_reaction(
+                    ctx.store,
+                    domain=str(payload.get("domain") or ""),
+                    event_type=str(payload.get("event_type") or ""),
+                    event_label=str(payload.get("event_label") or ""),
+                    occurred_at=str(payload.get("occurred_at") or ""),
+                    reaction_direction=str(payload.get("reaction_direction") or ""),
+                    narrative=str(payload.get("narrative") or ""),
+                    asset_label=payload.get("asset_label"),
+                    market_label=payload.get("market_label"),
+                    reaction_magnitude_pct=payload.get("reaction_magnitude_pct"),
+                    sources=payload.get("sources"),
+                    keywords=payload.get("keywords"),
+                )
+                return {
+                    "agent_id": profile.agent_id,
+                    "recorded": True,
+                    "reaction_id": reaction["reaction_id"],
+                    "advisory_only": True,
+                    "live_trading_enabled": False,
+                }
+            domain = str(payload.get("domain") or "").strip().upper()
+            event_type = str(payload.get("event_type") or "").strip()
+            if not domain or not event_type:
+                raise ValueError("EVALUATE_EVENT_PATTERN payload requires 'domain' and 'event_type'")
+            analysis = analyze_event_pattern(ctx.store, domain=domain, event_type=event_type)
+            return {
+                "agent_id": profile.agent_id,
+                "pattern_analysis": analysis,
+                "advisory_only": True,
+                "live_trading_enabled": False,
+            }
+
         # Deterministic advisory probability & Brier score evaluation ($0 LLM cost)
         forecasts = payload.get("forecasts") or [
             {"id": "CAL-DEFAULT-1", "subject_key": "binary_complement_sum", "predicted_prob": 0.50, "actual_outcome": 1}

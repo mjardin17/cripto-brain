@@ -404,6 +404,102 @@ export interface CrossVenuePairRecord {
   review_state?: PairReviewState;
 }
 
+export interface CouncilMemberDef {
+  member_id: string;
+  name: string;
+  role: string;
+  description: string;
+}
+
+export interface CouncilDefinition {
+  domain: 'STOCKS' | 'CRYPTO';
+  label: string;
+  keywords: string[];
+  members: CouncilMemberDef[];
+  min_approved_net_edge_pct: number;
+  advisory_only: boolean;
+  live_trading_enabled: boolean;
+}
+
+export interface CouncilMemberStance {
+  member_id: string;
+  name: string;
+  role: string;
+  stance: 'GO' | 'HOLD' | 'NO' | 'ABSTAIN';
+  rationale: string;
+  key_metrics: Record<string, unknown>;
+}
+
+export interface CouncilSession {
+  session_id: string;
+  domain: 'STOCKS' | 'CRYPTO';
+  topic: string | null;
+  verdict: 'GO' | 'HOLD';
+  confidence: number;
+  member_stances: CouncilMemberStance[];
+  verdict_detail: {
+    verdict: string;
+    confidence: number;
+    go_votes: number;
+    no_votes: number;
+    abstain_votes: number;
+    rationale: string;
+  };
+  key_metrics: Record<string, unknown>;
+  dissent: string | null;
+  convened_at: string;
+  advisory_only: boolean;
+  live_trading_enabled: boolean;
+}
+
+export interface EventReactionRecord {
+  reaction_id: string;
+  domain: 'STOCKS' | 'CRYPTO';
+  event_type: string;
+  event_label: string;
+  occurred_at: string;
+  asset_label: string | null;
+  market_label: string | null;
+  reaction_direction: 'UP' | 'DOWN' | 'FLAT';
+  reaction_magnitude_pct: number | null;
+  narrative: string;
+  sources: string[];
+  keywords: string[];
+}
+
+export interface PatternAnalysis {
+  domain: string;
+  event_type: string;
+  analog_count: number;
+  predictable: boolean;
+  dominant_direction?: 'UP' | 'DOWN' | 'FLAT';
+  base_rate?: number;
+  up_count?: number;
+  down_count?: number;
+  flat_count?: number;
+  median_magnitude_pct?: number | null;
+  analog_probability?: number;
+  confidence?: number;
+  insufficient_sample?: boolean;
+  reason?: string;
+  analogs?: EventReactionRecord[];
+}
+
+export interface PatternPrediction extends PatternAnalysis {
+  advisory_only: boolean;
+  live_trading_enabled: boolean;
+  description: string | null;
+  prediction?: {
+    direction: 'UP' | 'DOWN' | 'FLAT';
+    probability: number;
+    expected_magnitude_pct?: number | null;
+    confidence: number;
+    note: string;
+  };
+  recorded_prediction_id?: string;
+  recorded_prediction_error?: string;
+}
+
 export type PairReviewState = 'PENDING_REVIEW' | 'CONFIRMED' | 'REJECTED';
 
 export interface PairReviewPolymarketSide {

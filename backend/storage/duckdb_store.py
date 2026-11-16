@@ -580,6 +580,41 @@ class DuckDBStore:
             )
             self._conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS event_reactions (
+                    reaction_id VARCHAR PRIMARY KEY,
+                    domain VARCHAR NOT NULL,
+                    event_type VARCHAR NOT NULL,
+                    event_label VARCHAR NOT NULL,
+                    occurred_at VARCHAR NOT NULL,
+                    asset_label VARCHAR,
+                    market_label VARCHAR,
+                    reaction_direction VARCHAR NOT NULL,
+                    reaction_magnitude_pct DOUBLE,
+                    narrative VARCHAR NOT NULL,
+                    sources_json VARCHAR NOT NULL,
+                    keywords_json VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS council_sessions (
+                    session_id VARCHAR PRIMARY KEY,
+                    domain VARCHAR NOT NULL,
+                    topic VARCHAR,
+                    verdict VARCHAR NOT NULL,
+                    confidence DOUBLE NOT NULL,
+                    member_stances_json VARCHAR NOT NULL,
+                    verdict_detail_json VARCHAR NOT NULL,
+                    key_metrics_json VARCHAR NOT NULL,
+                    dissent VARCHAR,
+                    convened_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS research_validations (
                     validation_id VARCHAR PRIMARY KEY,
                     agent_id VARCHAR NOT NULL,
@@ -968,6 +1003,109 @@ class DuckDBStore:
                     snapshot["ingested_at"],
                 ],
             )
+
+    def save_event_reaction(self, reaction: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO event_reactions VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    reaction["reaction_id"],
+                    reaction["domain"],
+                    reaction["event_type"],
+                    reaction["event_label"],
+                    reaction["occurred_at"],
+                    reaction.get("asset_label"),
+                    reaction.get("market_label"),
+                    reaction["reaction_direction"],
+                    reaction.get("reaction_magnitude_pct"),
+                    reaction["narrative"],
+                    json.dumps(list(reaction.get("sources", []))),
+                    json.dumps(list(reaction.get("keywords", []))),
+                    reaction["created_at"],
+                ],
+            )
+        return reaction
+
+    def list_event_reactions(
+        self, *, domain: str | None = None, event_type: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            sql = "SELECT * FROM event_reactions"
+            conds: list[str] = []
+            params: list[Any] = []
+            if domain:
+                conds.append("domain = ?")
+                params.append(domain.strip().upper())
+            if event_type:
+                conds.append("event_type = ?")
+                params.append(event_type.strip().upper())
+            if conds:
+                sql += " WHERE " + " AND ".join(conds)
+            sql += " ORDER BY occurred_at DESC LIMIT ?"
+            params.append(int(limit))
+            rows = self._conn.execute(sql, params).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            items: list[dict[str, Any]] = []
+            for row in rows:
+                item = dict(zip(cols, row))
+                item["sources"] = json.loads(item.pop("sources_json") or "[]")
+                item["keywords"] = json.loads(item.pop("keywords_json") or "[]")
+                items.append(item)
+            return items
+
+    def save_council_session(self, session: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO council_sessions VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    session["session_id"],
+                    session["domain"],
+                    session.get("topic"),
+                    session["verdict"],
+                    float(session["confidence"]),
+                    json.dumps(list(session.get("member_stances", []))),
+                    json.dumps(dict(session.get("verdict_detail", {}))),
+                    json.dumps(dict(session.get("key_metrics", {}))),
+                    session.get("dissent"),
+                    session["convened_at"],
+                ],
+            )
+        return session
+
+    def list_council_sessions(
+        self, *, domain: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            if domain:
+                rows = self._conn.execute(
+                    """
+                    SELECT * FROM council_sessions WHERE domain = ?
+                    ORDER BY convened_at DESC LIMIT ?
+                    """,
+                    [domain.strip().upper(), int(limit)],
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM council_sessions ORDER BY convened_at DESC LIMIT ?",
+                    [int(limit)],
+                ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            cols = [d[0] for d in self._conn.description]
+            item = dict(zip(cols, row))
+            item["member_stances"] = json.loads(item.pop("member_stances_json") or "[]")
+            item["verdict_detail"] = json.loads(item.pop("verdict_detail_json") or "{}")
+            item["key_metrics"] = json.loads(item.pop("key_metrics_json") or "{}")
+            items.append(item)
+        return items
 
     def record_opportunity(self, opp: dict[str, Any]) -> None:
         with self._lock:

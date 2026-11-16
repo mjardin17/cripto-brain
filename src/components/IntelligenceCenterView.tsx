@@ -11,6 +11,8 @@ import {
   summarizeAgentTaskStatus,
 } from '../utils/formatters';
 import { ProvenanceLabel } from './ProvenanceLabel';
+import { CouncilPanel } from './CouncilPanel';
+import { PatternIntelligencePanel } from './PatternIntelligencePanel';
 import { OperationsStage3EPanels } from './OperationsStage3EPanels';
 
 interface IntelligenceCenterViewProps {
@@ -270,6 +272,12 @@ export function IntelligenceCenterView({
           </div>
         </div>
       </section>
+
+      {/* Council Deliberation Teams (Stocks & Crypto) */}
+      <CouncilPanel canDispatchAgents={canDispatchAgents} onRefresh={onRefresh} />
+
+      {/* Event Pattern Intelligence (historical analogs -> predictions) */}
+      <PatternIntelligencePanel canDispatchAgents={canDispatchAgents} />
 
       {/* Section 1 & 2: Specialized Agents + Worker Pool & Concurrency */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">

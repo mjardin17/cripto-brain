@@ -44,6 +44,8 @@
 │  │     ├── matcher.py            Fail-closed settlement matcher         │
 │  │     ├── pair_discovery.py     Poly<->Kalshi candidate pair registry  │
 │  │     ├── pair_review.py        Side-by-side rules review & reject     │
+│  │     ├── council.py           STOCKS/CRYPTO deliberation teams    │
+│  │     ├── pattern_intelligence Historical event analogs->predict  │
 │  │     └── cross_venue.py        Cross-venue route VWAP & scanner       │
 │  │                                                                      │
 │  ├── backend/execution/          Simulated Execution Engine             │

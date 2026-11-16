@@ -30,6 +30,12 @@ from backend.intelligence.memory_manager import MemoryTier, StructuredMemoryMana
 from backend.intelligence.model_router import CostAwareModelRouter
 from backend.intelligence.operations import OperationalHealthMonitor, SoakMode, SoakTestManager
 from backend.intelligence.probability import ConfigGovernanceManager, ProbabilityIntelligenceEngine
+from backend.intelligence.council import COUNCIL_DOMAINS, convene_council, get_council_definition
+from backend.intelligence.pattern_intelligence import (
+    analyze_event_pattern,
+    predict_reaction_to_event,
+    record_event_reaction,
+)
 from backend.intelligence.supervisor import SupervisorOrchestrator
 from backend.intelligence.validation_labs import (
     AdversarialReviewEngine,
@@ -210,6 +216,30 @@ class CrossVenueDiscoverRequest(BaseModel):
 
 class CrossVenuePairRejectRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=400)
+
+
+class CouncilConveneRequest(BaseModel):
+    topic: str | None = Field(default=None, max_length=200)
+
+
+class EventReactionCreateRequest(BaseModel):
+    domain: str = Field(min_length=4, max_length=10)
+    event_type: str = Field(min_length=2, max_length=60)
+    event_label: str = Field(min_length=3, max_length=160)
+    occurred_at: str = Field(min_length=8, max_length=40)
+    reaction_direction: str = Field(min_length=2, max_length=5)
+    narrative: str = Field(min_length=10, max_length=2000)
+    asset_label: str | None = Field(default=None, max_length=80)
+    market_label: str | None = Field(default=None, max_length=160)
+    reaction_magnitude_pct: float | None = Field(default=None, ge=-100, le=100)
+    sources: list[str] = Field(default_factory=list, max_length=10)
+    keywords: list[str] = Field(default_factory=list, max_length=20)
+
+
+class PatternPredictRequest(BaseModel):
+    domain: str = Field(min_length=4, max_length=10)
+    event_type: str = Field(min_length=2, max_length=60)
+    description: str | None = Field(default=None, max_length=500)
 
 
 class StructuredMemoryCreateRequest(BaseModel):
@@ -1939,6 +1969,138 @@ def create_app(
                 status_code=502,
                 detail=f"Cross-venue discovery failed: {sanitize_error_message(exc)}",
             ) from exc
+
+    @app.get("/api/councils")
+    async def list_councils(_: AuthenticatedUser = Depends(read_only_guard)) -> dict[str, Any]:
+        return {"councils": [get_council_definition(d) for d in COUNCIL_DOMAINS]}
+
+    @app.get("/api/councils/{domain}/sessions")
+    async def list_council_sessions(
+        domain: str,
+        limit: int = Query(default=20, ge=1, le=100),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        d = domain.strip().upper()
+        if d not in COUNCIL_DOMAINS:
+            raise HTTPException(status_code=404, detail=f"Unknown council domain '{domain}'")
+        items = store.list_council_sessions(domain=d, limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/councils/{domain}/convene")
+    async def convene_council_endpoint(
+        domain: str,
+        req: CouncilConveneRequest,
+        _: AuthenticatedUser = Depends(operator_guard),
+    ) -> dict[str, Any]:
+        d = domain.strip().upper()
+        if d not in COUNCIL_DOMAINS:
+            raise HTTPException(status_code=404, detail=f"Unknown council domain '{domain}'")
+        try:
+            return convene_council(store, d, topic=req.topic)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
+
+    @app.get("/api/patterns/events")
+    async def list_event_reactions_endpoint(
+        domain: str | None = Query(default=None),
+        event_type: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=300),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        items = store.list_event_reactions(domain=domain, event_type=event_type, limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/patterns/events")
+    async def record_event_reaction_endpoint(
+        req: EventReactionCreateRequest,
+        _: AuthenticatedUser = Depends(operator_guard),
+    ) -> dict[str, Any]:
+        try:
+            reaction = record_event_reaction(
+                store,
+                domain=req.domain,
+                event_type=req.event_type,
+                event_label=req.event_label,
+                occurred_at=req.occurred_at,
+                reaction_direction=req.reaction_direction,
+                narrative=req.narrative,
+                asset_label=req.asset_label,
+                market_label=req.market_label,
+                reaction_magnitude_pct=req.reaction_magnitude_pct,
+                sources=req.sources,
+                keywords=req.keywords,
+            )
+            return {"reaction": reaction}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
+
+    @app.get("/api/patterns/analyze")
+    async def analyze_pattern_endpoint(
+        domain: str = Query(...),
+        event_type: str = Query(...),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        if domain.strip().upper() not in COUNCIL_DOMAINS:
+            raise HTTPException(status_code=400, detail=f"Unknown domain '{domain}'")
+        return analyze_event_pattern(store, domain=domain, event_type=event_type)
+
+    @app.post("/api/patterns/predict")
+    async def predict_pattern_endpoint(
+        req: PatternPredictRequest,
+        _: AuthenticatedUser = Depends(analyst_guard),
+    ) -> dict[str, Any]:
+        if req.domain.strip().upper() not in COUNCIL_DOMAINS:
+            raise HTTPException(status_code=400, detail=f"Unknown domain '{req.domain}'")
+        result = predict_reaction_to_event(
+            store,
+            domain=req.domain,
+            event_type=req.event_type,
+            description=req.description,
+        )
+        # Track the pattern call as a scored prediction when one is possible,
+        # so resolution feeds the Brier calibration loop.
+        prediction = result.get("prediction")
+        if prediction and result.get("predictable"):
+            try:
+                dom = req.domain.strip().upper()
+                direction = str(prediction.get("direction") or "FLAT").lower()
+                prob = float(prediction.get("probability") or 0.5)
+                if direction == "down":
+                    recorded_prob = prob
+                    question = (
+                        f"Will {dom} assets fall after {req.event_type.strip()}? "
+                        f"(pattern analog base rate)"
+                    )
+                    implied = None
+                elif direction == "up":
+                    recorded_prob = prob
+                    question = (
+                        f"Will {dom} assets rise after {req.event_type.strip()}? "
+                        f"(pattern analog base rate)"
+                    )
+                    implied = None
+                else:
+                    recorded_prob = 0.5
+                    question = f"Will {dom} assets stay flat after {req.event_type.strip()}?"
+                    implied = None
+                recorded = prob_engine.record_prediction(
+                    agent_id="pattern_intelligence_agent",
+                    market_id=f"EVT-{req.event_type.strip().upper()}-{dom}",
+                    venue="pattern_analog",
+                    subject_key=f"event_pattern_{req.event_type.strip().lower()}",
+                    question=question,
+                    predicted_prob=recorded_prob,
+                    market_implied_prob=implied,
+                    confidence=float(prediction.get("confidence") or 0.5),
+                    rationale=str(prediction.get("note") or "Pattern analog call"),
+                    evidence=result.get("analogs", []),
+                    provenance="SIMULATED",
+                    market_category="event_pattern",
+                )
+                result["recorded_prediction_id"] = recorded["prediction_id"]
+            except ValueError:
+                result["recorded_prediction_error"] = "Prediction recording failed validation"
+        return result
 
     @app.get("/api/cross-venue/opportunities")
     async def list_cross_venue_opportunities(

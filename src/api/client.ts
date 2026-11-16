@@ -13,6 +13,11 @@ import type {
   CrossVenueScanResponse,
   PairDiscoveryResponse,
   PairReviewResponse,
+  CouncilDefinition,
+  CouncilSession,
+  EventReactionRecord,
+  PatternAnalysis,
+  PatternPrediction,
   DashboardPayload,
   HealthPayload,
   HistoricalValidationReport,
@@ -210,6 +215,54 @@ export const certaintyApi = {
       `/api/cross-venue/pairs/${encodeURIComponent(pairId)}/reject`,
       { method: 'POST', body: JSON.stringify({ reason }) }
     ),
+
+  getCouncils: () =>
+    apiFetch<{ councils: CouncilDefinition[] }>('/api/councils'),
+
+  getCouncilSessions: (domain: 'STOCKS' | 'CRYPTO', limit = 10) =>
+    apiFetch<{ count: number; items: CouncilSession[] }>(
+      `/api/councils/${domain}/sessions?limit=${limit}`
+    ),
+
+  conveneCouncil: (domain: 'STOCKS' | 'CRYPTO', topic?: string) =>
+    apiFetch<CouncilSession>(`/api/councils/${domain}/convene`, {
+      method: 'POST',
+      body: JSON.stringify({ topic: topic ?? null }),
+    }),
+
+  getEventReactions: (domain?: 'STOCKS' | 'CRYPTO') =>
+    apiFetch<{ count: number; items: EventReactionRecord[] }>(
+      `/api/patterns/events${domain ? `?domain=${domain}` : ''}`
+    ),
+
+  recordEventReaction: (payload: {
+    domain: string;
+    event_type: string;
+    event_label: string;
+    occurred_at: string;
+    reaction_direction: string;
+    narrative: string;
+    asset_label?: string | null;
+    market_label?: string | null;
+    reaction_magnitude_pct?: number | null;
+    sources?: string[];
+    keywords?: string[];
+  }) =>
+    apiFetch<{ reaction: EventReactionRecord }>('/api/patterns/events', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  analyzeEventPattern: (domain: 'STOCKS' | 'CRYPTO', eventType: string) =>
+    apiFetch<PatternAnalysis>(
+      `/api/patterns/analyze?domain=${domain}&event_type=${encodeURIComponent(eventType)}`
+    ),
+
+  predictEventPattern: (domain: 'STOCKS' | 'CRYPTO', eventType: string, description?: string) =>
+    apiFetch<PatternPrediction>('/api/patterns/predict', {
+      method: 'POST',
+      body: JSON.stringify({ domain, event_type: eventType, description: description ?? null }),
+    }),
 
   getCrossVenueOpportunities: (limit = 100) =>
     apiFetch<{ count: number; items: CrossVenueOpportunityRecord[] }>(
