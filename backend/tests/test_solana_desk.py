@@ -74,6 +74,9 @@ def test_hard_stop_and_trailing_stop():
 def test_one_entry_per_mint():
     desk = SolanaPaperDesk()
     c = candidate()
+    with pytest.raises(ValueError):
+        desk.open_paper_position(c, 1.0, 22.4)
+    desk.process_candidate(c, good_evidence(), FixedAnalyst())
     desk.open_paper_position(c, 1.0, 22.4)
     with pytest.raises(ValueError):
         desk.open_paper_position(c, 0.9, 10.0)
