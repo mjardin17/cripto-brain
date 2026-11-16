@@ -91,20 +91,22 @@ def test_binary_arbitrage_marks_insufficient_depth_non_executable():
     assert res.net_edge_pct is None
 
 
-def test_compute_data_freshness_uses_worst_case_age_and_fails_closed():
+def test_compute_data_freshness_uses_fetch_age_and_fails_closed():
     now_ms = 1_794_552_500_000
-    # Stale CLOB book timestamp (22s old) despite recent HTTP fetch (50ms old) -> 22,000ms
-    stale_clob = compute_data_freshness(
+    # Quiet market: book last updated 46s ago (no trades) but fetched live 50ms
+    # ago. The resting book is still the current live book, so the canonical
+    # gating age is the fetch age, not the book's last-update timestamp.
+    quiet_market = compute_data_freshness(
         now_ms=now_ms,
-        yes_book_ts_ms=now_ms - 22_000,
-        no_book_ts_ms=now_ms - 1_500,
+        yes_book_ts_ms=now_ms - 46_000,
+        no_book_ts_ms=now_ms - 40_000,
         yes_fetched_at_ms=now_ms - 50,
         no_fetched_at_ms=now_ms - 40,
     )
-    assert stale_clob.valid is True
-    assert stale_clob.clob_age_ms == 22_000
-    assert stale_clob.fetch_age_ms == 50
-    assert stale_clob.data_age_ms == 22_000
+    assert quiet_market.valid is True
+    assert quiet_market.clob_age_ms == 46_000
+    assert quiet_market.fetch_age_ms == 50
+    assert quiet_market.data_age_ms == 50
 
     # Missing/zero timestamp fails closed with data_age_ms = -1
     missing_ts = compute_data_freshness(

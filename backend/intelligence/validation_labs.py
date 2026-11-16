@@ -889,7 +889,11 @@ class PaperStressLab:
                 "allow_early_close_variance": False,
             }
 
+            # STALE_ORDER_BOOKS simulates a stale VIEW of the books: the data
+            # was fetched 25s ago (the book's own last-update timestamp is
+            # diagnostics-only and must not drive the gating decision).
             book_ts = now_ms - (25_000 if scen == "STALE_ORDER_BOOKS" else 150)
+            fetch_ts = now_ms - (25_000 if scen == "STALE_ORDER_BOOKS" else 0)
             ask_size = 50.0 if scen == "THIN_LIQUIDITY" else 800.0
             yes_ask_px = 0.44
             no_ask_px = 0.48
@@ -908,7 +912,7 @@ class PaperStressLab:
                 token_id="yes_tok",
                 market_condition_id="0xstresscond",
                 timestamp_ms=book_ts,
-                fetched_at_ms=now_ms,
+                fetched_at_ms=fetch_ts,
                 min_order_size=1.0,
                 tick_size=0.01,
                 neg_risk=False,
@@ -920,7 +924,7 @@ class PaperStressLab:
                 token_id="no_tok",
                 market_condition_id="0xstresscond",
                 timestamp_ms=book_ts,
-                fetched_at_ms=now_ms,
+                fetched_at_ms=fetch_ts,
                 min_order_size=1.0,
                 tick_size=0.01,
                 neg_risk=False,
@@ -934,7 +938,7 @@ class PaperStressLab:
             kalshi_snap = KalshiBookSnapshot(
                 ticker=kalshi_mkt.ticker,
                 timestamp_ms=book_ts,
-                fetched_at_ms=now_ms,
+                fetched_at_ms=fetch_ts,
                 yes_book=NormalizedOrderBook(
                     bids=(OrderBookLevel(0.49, 800.0),),
                     asks=(OrderBookLevel(0.52, ask_size),),
@@ -950,7 +954,7 @@ class PaperStressLab:
                 KalshiBookSnapshot(
                     ticker=kalshi_mkt.ticker,
                     timestamp_ms=book_ts,
-                    fetched_at_ms=now_ms,
+                    fetched_at_ms=fetch_ts,
                     yes_book=kalshi_snap.yes_book,
                     no_book=NormalizedOrderBook(
                         bids=(OrderBookLevel(0.46, 800.0),),

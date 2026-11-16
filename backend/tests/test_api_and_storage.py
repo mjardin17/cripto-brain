@@ -151,12 +151,14 @@ def test_scanner_enforces_consistent_canonical_data_age_fail_closed():
         async def fetch_order_book(self, token_id: str):
             now_ms = int(time.time() * 1000)
             price = "0.45" if token_id == "Y1" else "0.50"
-            # Book timestamp is 25s stale even though HTTP fetch happened just now
+            # Data was fetched 25s ago (stale view of the book) -> must fail
+            # closed. The book's own last-update timestamp is even older and is
+            # diagnostics-only; it must not affect the gating decision.
             return PolymarketBookSnapshot(
                 token_id=token_id,
                 market_condition_id="0xstale",
-                timestamp_ms=now_ms - 25_000,
-                fetched_at_ms=now_ms,
+                timestamp_ms=now_ms - 60_000,
+                fetched_at_ms=now_ms - 25_000,
                 min_order_size=1.0,
                 tick_size=0.01,
                 neg_risk=False,

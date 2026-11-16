@@ -103,8 +103,13 @@ def compute_data_freshness(
 
     - Missing/non-positive timestamps fail closed (data_age_ms = -1).
     - Future-skewed timestamps beyond tolerance fail closed (data_age_ms = -1).
-    - Canonical data_age_ms is max(clob_age_ms, fetch_age_ms) so neither stale
-      exchange books nor stale local polls can bypass Risk Gate rejection.
+    - Canonical data_age_ms is fetch_age_ms (time since the live book was
+      actually retrieved). The CLOB/venue book `timestamp` field is the book's
+      LAST-UPDATE time (verified live: an unchanged resting book on a quiet
+      market can carry a timestamp minutes old while still being the current
+      live book). Measuring staleness from clob_age_ms falsely denied every
+      quiet-but-valid market at the Risk Gate; clob_age_ms is therefore
+      reported for diagnostics only, and the fetch age governs freshness.
     """
     timestamps = (yes_book_ts_ms, no_book_ts_ms, yes_fetched_at_ms, no_fetched_at_ms)
     if now_ms <= 0 or any(ts <= 0 for ts in timestamps):
@@ -119,10 +124,11 @@ def compute_data_freshness(
 
     clob_age_ms = max(0, now_ms - oldest_book_ts)
     fetch_age_ms = max(0, now_ms - oldest_fetch_ts)
-    canonical_age_ms = max(clob_age_ms, fetch_age_ms)
+    # Freshness for gating = fetch age (see docstring). The venue book
+    # timestamp only feeds diagnostics and the fail-closed future-skew check.
     return DataFreshness(
         valid=True,
-        data_age_ms=canonical_age_ms,
+        data_age_ms=fetch_age_ms,
         clob_age_ms=clob_age_ms,
         fetch_age_ms=fetch_age_ms,
     )
