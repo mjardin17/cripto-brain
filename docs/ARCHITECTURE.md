@@ -42,6 +42,7 @@
 │  │     ├── calculator.py         Book VWAP, fee, freshness, edge math   │
 │  │     ├── scanner.py            Polymarket discovery + batch evaluator │
 │  │     ├── matcher.py            Fail-closed settlement matcher         │
+│  │     ├── pair_discovery.py     Poly<->Kalshi candidate pair registry  │
 │  │     └── cross_venue.py        Cross-venue route VWAP & scanner       │
 │  │                                                                      │
 │  ├── backend/execution/          Simulated Execution Engine             │

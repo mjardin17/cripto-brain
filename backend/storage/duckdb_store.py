@@ -1220,6 +1220,20 @@ class DuckDBStore:
                 out.append(d)
             return out
 
+    def find_cross_venue_pair(self, poly_market_id: str, kalshi_ticker: str) -> dict[str, Any] | None:
+        """Look up a registered pair by its underlying venue market identifiers."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM cross_venue_pairs WHERE poly_market_id = ? AND kalshi_ticker = ? LIMIT 1",
+                [poly_market_id, kalshi_ticker],
+            ).fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in self._conn.description]
+            d = dict(zip(cols, row))
+            d["mismatch_reasons"] = json.loads(d.pop("mismatch_reasons_json", "[]"))
+            return d
+
     def get_cross_venue_pair(self, pair_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(

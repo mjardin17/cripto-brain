@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from backend.arbitrage.cross_venue import CrossVenueScanner
 from backend.arbitrage.matcher import assess_contract_equivalence, title_similarity_score
+from backend.arbitrage.pair_discovery import discover_pairs
 from backend.arbitrage.scanner import PolymarketArbitrageScanner
 from backend.execution.paper_simulator import PaperExecutionEngine, PaperExecutionRequest
 from backend.future.modules import get_module_registry
@@ -192,6 +193,13 @@ class CrossVenueScanRequest(BaseModel):
     pair_id: str | None = None
     target_shares: float = Field(default=25.0, gt=0.0, le=500.0)
     slippage_buffer_bps: float = Field(default=15.0, ge=0.0, le=200.0)
+
+
+class CrossVenueDiscoverRequest(BaseModel):
+    persist: bool = False  # False = dry-run preview; True = persist UNVERIFIED candidates
+    poly_pages: int = Field(default=5, ge=1, le=10)
+    kalshi_max_pages: int = Field(default=40, ge=1, le=60)
+    min_similarity: float = Field(default=0.3, ge=0.1, le=1.0)
 
 
 class StructuredMemoryCreateRequest(BaseModel):
@@ -1867,6 +1875,30 @@ def create_app(
                 "checks": list(assessment.checks),
             },
         }
+
+    @app.post("/api/cross-venue/discover")
+    async def discover_cross_venue_pairs(
+        req: CrossVenueDiscoverRequest,
+        _: AuthenticatedUser = Depends(operator_guard),
+    ) -> dict[str, Any]:
+        """Discover Polymarket<->Kalshi candidate pairs from live read-only data.
+
+        Candidates are never settlement-verified; registered pairs stay denied by
+        the Risk Gate until an operator attests them via POST /api/cross-venue/pairs.
+        """
+        try:
+            return await discover_pairs(
+                store,
+                register=req.persist,
+                poly_pages=req.poly_pages,
+                kalshi_max_pages=req.kalshi_max_pages,
+                min_similarity=req.min_similarity,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Cross-venue discovery failed: {sanitize_error_message(exc)}",
+            ) from exc
 
     @app.get("/api/cross-venue/opportunities")
     async def list_cross_venue_opportunities(
