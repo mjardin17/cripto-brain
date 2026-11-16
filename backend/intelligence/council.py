@@ -185,6 +185,30 @@ def gather_domain_facts(store: DuckDBStore, domain: str) -> dict[str, Any]:
                 "base_rate": round(base_rate, 4),
             }
 
+    # Next-fluctuation forecast for the strongest pattern driver.
+    next_fluctuation: dict[str, Any] | None = None
+    if best_pattern is not None:
+        from backend.intelligence.fluctuation_analyzer import forecast_next_fluctuations
+
+        try:
+            fc = forecast_next_fluctuations(store, domain=d, horizon_days=30.0)
+            for f in fc.get("forecasts", []):
+                if (
+                    f.get("event_type") == best_pattern["event_type"]
+                    and not f.get("insufficient_history", True)
+                ):
+                    next_fluctuation = {
+                        "event_type": f["event_type"],
+                        "next_expected_at": f.get("next_expected_at"),
+                        "days_until_expected": f.get("days_until_expected"),
+                        "expected_direction": f.get("expected_direction"),
+                        "probability_within_horizon": f.get("probability_within_horizon"),
+                        "confidence": f.get("confidence"),
+                    }
+                    break
+        except ValueError:
+            next_fluctuation = None
+
     return {
         "domain": d,
         "opportunities_total": len(opps) + len(cross_opps),
@@ -198,6 +222,7 @@ def gather_domain_facts(store: DuckDBStore, domain: str) -> dict[str, Any]:
         "resolved_prediction_samples": len(brier_scores),
         "avg_brier": round(sum(brier_scores) / len(brier_scores), 6) if brier_scores else None,
         "best_pattern_analog": best_pattern,
+        "next_fluctuation": next_fluctuation,
     }
 
 
@@ -274,7 +299,8 @@ def _member_opening(member: dict[str, str], facts: dict[str, Any]) -> dict[str, 
 
     elif mid == "pattern_analyst":
         pattern = facts.get("best_pattern_analog")
-        metrics = {"best_pattern_analog": pattern}
+        forecast = facts.get("next_fluctuation")
+        metrics = {"best_pattern_analog": pattern, "next_fluctuation": forecast}
         if pattern is None:
             stance = "ABSTAIN"
             rationale = "No recorded historical event analogs for this domain — abstaining rather than guessing."
@@ -284,6 +310,12 @@ def _member_opening(member: dict[str, str], facts: dict[str, Any]) -> dict[str, 
                 f"{pattern['analog_count']} recorded {pattern['event_type']} analogs moved this domain "
                 f"{pattern['dominant_direction']} {pattern['base_rate']:.0%} of the time — a strong historical pattern."
             )
+            if forecast:
+                rationale += (
+                    f" Timing model expects the next {forecast['event_type']} fluctuation around "
+                    f"{str(forecast.get('next_expected_at'))[:10]} "
+                    f"({forecast.get('probability_within_horizon'):.0%} within 30 days)."
+                )
         else:
             stance = "HOLD"
             rationale = (

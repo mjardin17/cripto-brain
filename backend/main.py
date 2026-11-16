@@ -31,6 +31,10 @@ from backend.intelligence.model_router import CostAwareModelRouter
 from backend.intelligence.operations import OperationalHealthMonitor, SoakMode, SoakTestManager
 from backend.intelligence.probability import ConfigGovernanceManager, ProbabilityIntelligenceEngine
 from backend.intelligence.council import COUNCIL_DOMAINS, convene_council, get_council_definition
+from backend.intelligence.fluctuation_analyzer import (
+    analyze_fluctuation_drivers,
+    forecast_next_fluctuations,
+)
 from backend.intelligence.pattern_intelligence import (
     analyze_event_pattern,
     predict_reaction_to_event,
@@ -2101,6 +2105,27 @@ def create_app(
             except ValueError:
                 result["recorded_prediction_error"] = "Prediction recording failed validation"
         return result
+
+    @app.get("/api/fluctuations/analyze")
+    async def analyze_fluctuations_endpoint(
+        domain: str = Query(...),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        try:
+            return analyze_fluctuation_drivers(store, domain=domain)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
+
+    @app.get("/api/fluctuations/forecast")
+    async def forecast_fluctuations_endpoint(
+        domain: str = Query(...),
+        horizon_days: float = Query(default=30.0, ge=1.0, le=365.0),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        try:
+            return forecast_next_fluctuations(store, domain=domain, horizon_days=horizon_days)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
 
     @app.get("/api/cross-venue/opportunities")
     async def list_cross_venue_opportunities(

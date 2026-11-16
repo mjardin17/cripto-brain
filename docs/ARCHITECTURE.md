@@ -46,6 +46,7 @@
 │  │     ├── pair_review.py        Side-by-side rules review & reject     │
 │  │     ├── council.py           STOCKS/CRYPTO deliberation teams    │
 │  │     ├── pattern_intelligence Historical event analogs->predict  │
+│  │     ├── fluctuation_analyzer  Cause attribution + next-move timing  │
 │  │     └── cross_venue.py        Cross-venue route VWAP & scanner       │
 │  │                                                                      │
 │  ├── backend/execution/          Simulated Execution Engine             │

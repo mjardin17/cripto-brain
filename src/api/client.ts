@@ -18,6 +18,8 @@ import type {
   EventReactionRecord,
   PatternAnalysis,
   PatternPrediction,
+  FluctuationAnalysis,
+  FluctuationForecastResponse,
   DashboardPayload,
   HealthPayload,
   HistoricalValidationReport,
@@ -263,6 +265,14 @@ export const certaintyApi = {
       method: 'POST',
       body: JSON.stringify({ domain, event_type: eventType, description: description ?? null }),
     }),
+
+  analyzeFluctuations: (domain: 'STOCKS' | 'CRYPTO') =>
+    apiFetch<FluctuationAnalysis>(`/api/fluctuations/analyze?domain=${domain}`),
+
+  forecastFluctuations: (domain: 'STOCKS' | 'CRYPTO', horizonDays = 30) =>
+    apiFetch<FluctuationForecastResponse>(
+      `/api/fluctuations/forecast?domain=${domain}&horizon_days=${horizonDays}`
+    ),
 
   getCrossVenueOpportunities: (limit = 100) =>
     apiFetch<{ count: number; items: CrossVenueOpportunityRecord[] }>(

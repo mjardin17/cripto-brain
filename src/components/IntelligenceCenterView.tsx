@@ -13,6 +13,7 @@ import {
 import { ProvenanceLabel } from './ProvenanceLabel';
 import { CouncilPanel } from './CouncilPanel';
 import { PatternIntelligencePanel } from './PatternIntelligencePanel';
+import { FluctuationRadar } from './FluctuationRadar';
 import { OperationsStage3EPanels } from './OperationsStage3EPanels';
 
 interface IntelligenceCenterViewProps {
@@ -278,6 +279,9 @@ export function IntelligenceCenterView({
 
       {/* Event Pattern Intelligence (historical analogs -> predictions) */}
       <PatternIntelligencePanel canDispatchAgents={canDispatchAgents} />
+
+      {/* Fluctuation Radar (attribution + next-fluctuation timing) */}
+      <FluctuationRadar canDispatchAgents={canDispatchAgents} />
 
       {/* Section 1 & 2: Specialized Agents + Worker Pool & Concurrency */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">

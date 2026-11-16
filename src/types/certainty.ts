@@ -500,6 +500,53 @@ export interface PatternPrediction extends PatternAnalysis {
   recorded_prediction_error?: string;
 }
 
+export interface FluctuationDriver {
+  event_type: string;
+  analog_count: number;
+  dominant_direction: 'UP' | 'DOWN';
+  base_rate: number;
+  median_magnitude_pct: number | null;
+  total_impact_pct: number;
+  impact_share: number;
+  last_occurred_at: string;
+}
+
+export interface FluctuationAnalysis {
+  domain: string;
+  recorded_reactions: number;
+  top_driver?: string;
+  drivers: FluctuationDriver[];
+  volatility_note?: string;
+  reason?: string;
+  advisory_only: boolean;
+}
+
+export interface FluctuationForecast {
+  event_type: string;
+  analog_count: number;
+  insufficient_history: boolean;
+  reason?: string;
+  median_interval_days?: number;
+  interval_consistency?: number;
+  last_occurred_at?: string;
+  next_expected_at?: string;
+  days_until_expected?: number;
+  expected_direction?: 'UP' | 'DOWN';
+  expected_magnitude_pct?: number | null;
+  direction_base_rate?: number;
+  probability_within_horizon?: number;
+  confidence?: number;
+}
+
+export interface FluctuationForecastResponse {
+  domain: string;
+  horizon_days: number;
+  forecasts: FluctuationForecast[];
+  reason?: string;
+  advisory_only: boolean;
+  live_trading_enabled: boolean;
+}
+
 export type PairReviewState = 'PENDING_REVIEW' | 'CONFIRMED' | 'REJECTED';
 
 export interface PairReviewPolymarketSide {
