@@ -16,6 +16,12 @@ from pydantic import BaseModel, Field
 from backend.arbitrage.cross_venue import CrossVenueScanner
 from backend.arbitrage.matcher import assess_contract_equivalence, title_similarity_score
 from backend.arbitrage.pair_discovery import discover_pairs
+from backend.arbitrage.pair_review import (
+    build_pair_review,
+    build_rejected_record,
+    pair_review_state,
+    prioritize_pairs_for_scan,
+)
 from backend.arbitrage.scanner import PolymarketArbitrageScanner
 from backend.execution.paper_simulator import PaperExecutionEngine, PaperExecutionRequest
 from backend.future.modules import get_module_registry
@@ -200,6 +206,10 @@ class CrossVenueDiscoverRequest(BaseModel):
     poly_pages: int = Field(default=5, ge=1, le=10)
     kalshi_max_pages: int = Field(default=40, ge=1, le=60)
     min_similarity: float = Field(default=0.3, ge=0.1, le=1.0)
+
+
+class CrossVenuePairRejectRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=400)
 
 
 class StructuredMemoryCreateRequest(BaseModel):
@@ -1798,7 +1808,37 @@ def create_app(
         _: AuthenticatedUser = Depends(read_only_guard),
     ) -> dict[str, Any]:
         pairs = store.list_cross_venue_pairs(limit=limit)
-        return {"count": len(pairs), "items": pairs}
+        items = [{**p, "review_state": pair_review_state(p)} for p in pairs]
+        return {"count": len(items), "items": items}
+
+    @app.get("/api/cross-venue/pairs/{pair_id}/review")
+    async def review_cross_venue_pair(
+        pair_id: str,
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        pair = store.get_cross_venue_pair(pair_id)
+        if not pair:
+            raise HTTPException(status_code=404, detail=f"Unknown cross-venue pair_id '{pair_id}'")
+        try:
+            return await build_pair_review(pair)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Pair review fetch failed: {sanitize_error_message(exc)}",
+            ) from exc
+
+    @app.post("/api/cross-venue/pairs/{pair_id}/reject")
+    async def reject_cross_venue_pair(
+        pair_id: str,
+        req: CrossVenuePairRejectRequest,
+        _: AuthenticatedUser = Depends(operator_guard),
+    ) -> dict[str, Any]:
+        pair = store.get_cross_venue_pair(pair_id)
+        if not pair:
+            raise HTTPException(status_code=404, detail=f"Unknown cross-venue pair_id '{pair_id}'")
+        record = build_rejected_record(pair, req.reason)
+        store.upsert_cross_venue_pair(record)
+        return {"pair": {**record, "review_state": pair_review_state(record)}}
 
     @app.post("/api/cross-venue/pairs")
     async def register_cross_venue_pair(
@@ -1921,7 +1961,8 @@ def create_app(
                 )
             pairs = [pair]
         else:
-            pairs = store.list_cross_venue_pairs(limit=25)
+            # Confirmed pairs first, then pending; rejected pairs are skipped.
+            pairs = prioritize_pairs_for_scan(store.list_cross_venue_pairs(limit=200), limit=25)
 
         if not pairs:
             return {"count": 0, "results": [], "message": "No cross-venue pairs registered yet."}

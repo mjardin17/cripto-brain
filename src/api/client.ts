@@ -11,6 +11,8 @@ import type {
   CrossVenuePairRecord,
   CrossVenuePairRegisterResponse,
   CrossVenueScanResponse,
+  PairDiscoveryResponse,
+  PairReviewResponse,
   DashboardPayload,
   HealthPayload,
   HistoricalValidationReport,
@@ -191,6 +193,23 @@ export const certaintyApi = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  discoverCrossVenuePairs: (payload: { persist: boolean; min_similarity?: number }) =>
+    apiFetch<PairDiscoveryResponse>('/api/cross-venue/discover', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  getCrossVenuePairReview: (pairId: string) =>
+    apiFetch<PairReviewResponse>(
+      `/api/cross-venue/pairs/${encodeURIComponent(pairId)}/review`
+    ),
+
+  rejectCrossVenuePair: (pairId: string, reason: string) =>
+    apiFetch<{ pair: CrossVenuePairRecord }>(
+      `/api/cross-venue/pairs/${encodeURIComponent(pairId)}/reject`,
+      { method: 'POST', body: JSON.stringify({ reason }) }
+    ),
 
   getCrossVenueOpportunities: (limit = 100) =>
     apiFetch<{ count: number; items: CrossVenueOpportunityRecord[] }>(

@@ -21,6 +21,7 @@ import {
   summarizeExecutionOutcome,
 } from '../utils/formatters';
 import { ProvenanceLabel } from './ProvenanceLabel';
+import { PairReviewPanel } from './PairReviewPanel';
 
 interface CrossVenuePaperViewProps {
   polymarketOpportunities: ArbitrageOpportunity[];
@@ -747,6 +748,13 @@ export function CrossVenuePaperView({
           </div>
         </div>
       </section>
+
+      {/* Section 2b: Discovered Pair Review */}
+      <PairReviewPanel
+        pairs={pairs}
+        canManagePairs={canManagePairs}
+        onRefreshCrossVenue={onRefreshCrossVenue}
+      />
 
       {/* Section 3: Simulated Paper Execution Blotter */}
       <section className="border border-slate-800 bg-[#111827] rounded-xl overflow-hidden">

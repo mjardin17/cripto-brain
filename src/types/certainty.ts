@@ -401,6 +401,74 @@ export interface CrossVenuePairRecord {
   cutoff_delta_hours: number | null;
   notes: string;
   created_at: string;
+  review_state?: PairReviewState;
+}
+
+export type PairReviewState = 'PENDING_REVIEW' | 'CONFIRMED' | 'REJECTED';
+
+export interface PairReviewPolymarketSide {
+  market_id: string;
+  question: string;
+  rules_text: string;
+  resolution_source: string;
+  end_date: string;
+  neg_risk: boolean;
+  neg_risk_other: boolean;
+  url: string | null;
+}
+
+export interface PairReviewKalshiSide {
+  ticker: string;
+  title: string;
+  event_title: string;
+  yes_sub_title: string;
+  rules_primary: string;
+  rules_secondary: string;
+  early_close_condition: string;
+  can_close_early: boolean;
+  close_time: string;
+  expiration_time: string;
+  expected_expiration_time: string;
+  settlement_timer_seconds: number | null;
+  settlement_sources: { name: string; url: string }[];
+  contract_url: string | null;
+  url: string | null;
+}
+
+export interface PairReviewResponse {
+  provenance: 'LIVE';
+  pair: CrossVenuePairRecord;
+  review_state: PairReviewState;
+  polymarket: PairReviewPolymarketSide | null;
+  kalshi: PairReviewKalshiSide | null;
+  assessment: CrossVenueSettlementAssessment | null;
+  errors: string[];
+}
+
+export interface PairDiscoveryCandidate {
+  poly_market_id: string;
+  poly_question: string;
+  kalshi_ticker: string;
+  kalshi_title: string;
+  similarity: number;
+  cutoff_delta_hours: number | null;
+  settlement_status: string;
+  registered: boolean;
+  pair_id: string | null;
+  skip_reason: string | null;
+}
+
+export interface PairDiscoveryResponse {
+  provenance: 'LIVE';
+  mode: 'REGISTER' | 'DRY_RUN';
+  polymarket_markets_scanned: number;
+  kalshi_markets_scanned: number;
+  candidates_found: number;
+  registered_count: number;
+  verified_count: number;
+  warnings: string[];
+  note: string;
+  candidates: PairDiscoveryCandidate[];
 }
 
 export interface CrossVenuePairRegisterResponse {
