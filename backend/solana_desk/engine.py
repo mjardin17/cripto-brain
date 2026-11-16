@@ -18,6 +18,7 @@ class SolanaPaperDesk:
         self.events: list[DeskEvent] = []
         self._seen_mints: set[str] = set()
         self._entered_mints: set[str] = set()
+        self._paper_quote_approved: set[str] = set()
         self.live_trading_enabled = False
 
     def _log(self, agent: str, event: str, mint: str | None = None, **details) -> None:
@@ -53,6 +54,7 @@ class SolanaPaperDesk:
             self._log("EXECUTOR", "NO_TRADE_INSUFFICIENT_BALANCE", candidate.mint)
             return {"status": "NO_TRADE", "reason": "INSUFFICIENT_BALANCE"}
         self._seen_mints.add(candidate.mint)
+        self._paper_quote_approved.add(candidate.mint)
         self._log("EXECUTOR", "APPROVED_FOR_PAPER_QUOTE", candidate.mint,
                   max_notional_usd=notional, live_trading_enabled=False)
         self._log("LOGGER", "CANDIDATE_PIPELINE_COMPLETE", candidate.mint)
@@ -62,6 +64,8 @@ class SolanaPaperDesk:
     def open_paper_position(self, candidate: Candidate, entry_price: float, notional_usd: float) -> PaperPosition:
         if self.live_trading_enabled:
             raise RuntimeError("Live trading is forbidden in this module")
+        if candidate.mint not in self._paper_quote_approved:
+            raise ValueError("Candidate has not passed the complete paper authorization pipeline")
         if candidate.mint in self._entered_mints or candidate.mint in self.positions:
             raise ValueError("Only one entry per mint is permitted")
         max_notional = calculate_position_notional(self.balance_usd, self.config)
