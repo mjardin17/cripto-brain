@@ -6,12 +6,14 @@ import {
   KeyRound,
   Layers,
   ShieldAlert,
+  TrendingUp,
 } from 'lucide-react';
 import type { AuthenticatedUserRecord } from '../types/certainty';
 import { canAccessWorkspaceTab, describeUserRole } from '../utils/formatters';
 
 export type WorkspaceTab =
   | 'command'
+  | 'councils'
   | 'scanner'
   | 'cross_venue'
   | 'intelligence'
@@ -39,6 +41,12 @@ const NAV_ITEMS: Array<{
     label: 'Command Center',
     subtitle: 'Portfolio, exposure & overview',
     Icon: Activity,
+  },
+  {
+    id: 'councils',
+    label: 'AI Councils & Drivers',
+    subtitle: 'Crypto/Stocks councils & WHY/WHEN',
+    Icon: TrendingUp,
   },
   {
     id: 'scanner',

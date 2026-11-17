@@ -1417,3 +1417,211 @@ export interface PasswordResetTokenResponse {
   expires_at: string;
 }
 
+// ----------------------------------------------------------------------
+// Multi-Factor Market Drivers, Stocks & Crypto AI Councils, Movement Forecasts
+// ----------------------------------------------------------------------
+
+export interface MarketAssetDriver {
+  symbol: string;
+  source: string;
+  status: 'LIVE' | 'UNAVAILABLE';
+  latency_ms?: number;
+  price_usd?: number | null;
+  change_24h_pct?: number | null;
+  change_5d_pct?: number | null;
+  change_7d_pct?: number | null;
+  volume_24h_usd?: number | null;
+  volume_usd?: number | null;
+  volume_surge_ratio?: number | null;
+  intraday_range_pct?: number | null;
+  avg_range_20d_pct?: number | null;
+  compression_ratio?: number | null;
+  realized_vol_20d_pct?: number | null;
+  error?: string;
+}
+
+export interface CrossAssetCorrelation {
+  correlation: number | null;
+  sample_days: number;
+  regime: string;
+}
+
+export interface DerivativesDriver {
+  symbol: string;
+  source: string;
+  status: 'LIVE' | 'UNAVAILABLE';
+  funding_rate?: number | null;
+  funding_annualized_pct?: number | null;
+  open_interest_usd?: number | null;
+  long_short_account_ratio?: number | null;
+  crowding_regime?: string;
+  liquidation_risk_score?: number;
+  error?: string;
+}
+
+export interface WhyDriverItem {
+  driver_id: string;
+  category: string;
+  impact_score: number;
+  magnitude: number;
+  explanation: string;
+}
+
+export interface NewsCatalystItem {
+  source: string;
+  title: string;
+  summary: string;
+  published_at: string;
+  categories: string[];
+  sentiment_polarity: number;
+}
+
+export interface MarketDriverSnapshot {
+  snapshot_id: string;
+  provenance: DataProvenance;
+  verified_clean: boolean;
+  btc_price_usd: number | null;
+  eth_price_usd: number | null;
+  spy_price_usd: number | null;
+  qqq_price_usd: number | null;
+  ibit_price_usd: number | null;
+  fear_greed_value: number | null;
+  btc_funding_rate: number | null;
+  assets: Record<string, MarketAssetDriver>;
+  correlations: Record<string, CrossAssetCorrelation>;
+  derivatives: Record<string, DerivativesDriver>;
+  sentiment: {
+    source?: string;
+    status?: string;
+    value?: number;
+    classification?: string;
+    delta_7d?: number;
+  };
+  macro_news: {
+    total_items: number;
+    fed_policy_count: number;
+    macro_economic_count: number;
+    geopolitical_risk_count: number;
+    avg_news_polarity: number;
+    blocked_injection_count: number;
+    etf_flow_proxy: {
+      regime: string;
+      score: number;
+      signals: string[];
+    };
+    top_headlines: NewsCatalystItem[];
+  };
+  why_drivers: WhyDriverItem[];
+  when_signals: {
+    movement_regime: string;
+    expected_window: string;
+    movement_urgency_score: number;
+    avg_compression_ratio: number | null;
+    trigger_reasons: string[];
+    historical_analogs_count: number;
+    historical_analogs: Array<Record<string, unknown>>;
+  };
+  feed_health: {
+    feeds: Record<string, string>;
+    live_count: number;
+    total_count: number;
+  };
+  data_freshness_ms: number;
+  created_at: string;
+}
+
+export interface CouncilAgentOpinion {
+  role: string;
+  agent_id: string;
+  stance: string;
+  significant_move_prob: number;
+  up_prob: number;
+  confidence: number;
+  key_metrics: Record<string, unknown>;
+  rationale: string;
+}
+
+export interface CouncilChallengeItem {
+  challenger: string;
+  target: string;
+  claim_challenged: string;
+  challenge: string;
+  resolution: string;
+}
+
+export interface CouncilDeliberationRecord {
+  deliberation_id: string;
+  council_type: 'CRYPTO' | 'STOCKS';
+  snapshot_id: string;
+  provenance: DataProvenance;
+  verified_clean: boolean;
+  target_symbol: string;
+  horizon: string;
+  regime_verdict: string;
+  directional_bias: string;
+  significant_move_prob: number;
+  up_prob: number;
+  confidence: number;
+  why_explanation: string;
+  when_explanation: string;
+  agent_opinions: CouncilAgentOpinion[];
+  challenges: CouncilChallengeItem[];
+  dissent_summary: string;
+  risk_warnings: string[];
+  created_at: string;
+}
+
+export interface MovementForecastRecord {
+  forecast_id: string;
+  deliberation_id: string;
+  council_type: 'CRYPTO' | 'STOCKS';
+  symbol: string;
+  horizon: string;
+  move_threshold_pct: number;
+  predicted_move_prob: number;
+  predicted_up_prob: number;
+  confidence: number;
+  baseline_price: number | null;
+  provenance: string;
+  verified_clean: boolean;
+  status: 'OPEN' | 'RESOLVED' | 'VOIDED';
+  resolve_after: string;
+  actual_price: number | null;
+  actual_return_pct: number | null;
+  actual_outcome: number | null;
+  brier_score: number | null;
+  log_loss: number | null;
+  learning_cycle_id: string | null;
+  rationale: string;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+export interface CleanCalibrationMetrics {
+  isolation_mode: string;
+  resolved_count: number;
+  open_count: number;
+  voided_count: number;
+  excluded_non_live_or_unverified_count: number;
+  mean_brier_score: number | null;
+  mean_log_loss: number | null;
+  directional_accuracy_pct: number | null;
+  expected_calibration_error: number | null;
+}
+
+export interface MarketIntelligenceOverview {
+  provenance: DataProvenance;
+  live_trading_enabled: boolean;
+  horizon: string;
+  latest_snapshot: MarketDriverSnapshot | null;
+  crypto_council: CouncilDeliberationRecord | null;
+  stocks_council: CouncilDeliberationRecord | null;
+  recent_deliberations: CouncilDeliberationRecord[];
+  forecasts: MovementForecastRecord[];
+  calibration_live_only: CleanCalibrationMetrics;
+  crypto_calibration: CleanCalibrationMetrics;
+  stocks_calibration: CleanCalibrationMetrics;
+  generated_at: string;
+}
+
+

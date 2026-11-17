@@ -28,7 +28,10 @@ import type {
   KalshiMarketsListResponse,
   KillSwitchState,
   MarketBookSnapshotResponse,
+  MarketDriverSnapshot,
+  MarketIntelligenceOverview,
   ModelRoutingEvent,
+  MovementForecastRecord,
   OperationalHealthReport,
   PaperBlotterResponse,
   PaperExecuteResponse,
@@ -612,6 +615,58 @@ export const certaintyApi = {
   adminListAuditLogs: (limit = 120) =>
     apiFetch<{ count: number; immutable: boolean; items: SecurityAuditLogRecord[] }>(
       `/api/admin/audit-logs?limit=${limit}`
+    ),
+
+  // Multi-Factor Market Drivers & Stocks/Crypto AI Councils
+  getMarketIntelligenceOverview: (horizon: '4H' | '12H' | '24H' | '48H' = '24H') =>
+    apiFetch<MarketIntelligenceOverview>(`/api/market-intelligence/overview?horizon=${horizon}`),
+
+  ingestMarketDrivers: () =>
+    apiFetch<MarketDriverSnapshot>('/api/market-intelligence/ingest', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  conveneAiCouncils: (payload?: {
+    councils?: Array<'CRYPTO' | 'STOCKS'>;
+    horizon?: '4H' | '12H' | '24H' | '48H';
+    refresh_drivers?: boolean;
+    create_forecasts?: boolean;
+  }) =>
+    apiFetch<{
+      snapshot_id: string;
+      provenance: string;
+      verified_clean: boolean;
+      live_trading_enabled: boolean;
+      deliberations: Record<string, unknown>;
+      created_forecasts: MovementForecastRecord[];
+      snapshot: MarketDriverSnapshot;
+    }>('/api/market-intelligence/councils/convene', {
+      method: 'POST',
+      body: JSON.stringify(
+        payload ?? { horizon: '24H', refresh_drivers: true, create_forecasts: true }
+      ),
+    }),
+
+  resolveMovementForecast: (
+    forecastId: string,
+    payload: { actual_price?: number; void_reason?: string }
+  ) =>
+    apiFetch<MovementForecastRecord>(
+      `/api/market-intelligence/forecasts/${encodeURIComponent(forecastId)}/resolve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  resolveDueMovementForecasts: (forceAllLive = false) =>
+    apiFetch<{ resolved_count: number; items: MovementForecastRecord[] }>(
+      '/api/market-intelligence/forecasts/resolve-due',
+      {
+        method: 'POST',
+        body: JSON.stringify({ force_all_live: forceAllLive }),
+      }
     ),
 };
 

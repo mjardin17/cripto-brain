@@ -25,7 +25,9 @@ from backend.arbitrage.pair_review import (
 from backend.arbitrage.scanner import PolymarketArbitrageScanner
 from backend.execution.paper_simulator import PaperExecutionEngine, PaperExecutionRequest
 from backend.future.modules import get_module_registry
+from backend.intelligence.councils import AICouncilEngine, CouncilType
 from backend.intelligence.learning_engine import LearningEngine
+from backend.intelligence.market_drivers import MarketDriverEngine
 from backend.intelligence.memory_manager import MemoryTier, StructuredMemoryManager
 from backend.intelligence.model_router import CostAwareModelRouter
 from backend.intelligence.operations import OperationalHealthMonitor, SoakMode, SoakTestManager
@@ -397,6 +399,22 @@ class AdversarialReviewRequest(BaseModel):
     opposing_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class CouncilConveneRequest(BaseModel):
+    councils: list[CouncilType] | None = None
+    horizon: str = Field(default="24H", pattern="^(4H|12H|24H|48H)$")
+    refresh_drivers: bool = True
+    create_forecasts: bool = True
+
+
+class ForecastResolveRequest(BaseModel):
+    actual_price: float | None = Field(default=None, gt=0.0)
+    void_reason: str | None = Field(default=None, max_length=200)
+
+
+class ForecastResolveDueRequest(BaseModel):
+    force_all_live: bool = False
+
+
 def create_app(
     db_path: str | None = None,
     *,
@@ -448,6 +466,16 @@ def create_app(
     paper_stress_lab = PaperStressLab(store=store, learning=learning_engine)
     adversarial_engine = AdversarialReviewEngine(
         store=store, memory=memory_manager, learning=learning_engine
+    )
+    market_driver_engine = MarketDriverEngine(store=store)
+    ai_council_engine = AICouncilEngine(
+        store=store,
+        market_drivers=market_driver_engine,
+        risk_gate=risk_gate,
+        prob_engine=prob_engine,
+        learning=learning_engine,
+        memory=memory_manager,
+        adversarial=adversarial_engine,
     )
     auth_manager = AuthManager(store=store, settings=sec_settings)
     rate_limiter = DuckDBRateLimiter(
@@ -515,6 +543,8 @@ def create_app(
     app.state.research_validator = research_validator
     app.state.paper_stress_lab = paper_stress_lab
     app.state.adversarial_engine = adversarial_engine
+    app.state.market_driver_engine = market_driver_engine
+    app.state.ai_council_engine = ai_council_engine
     app.state.poly_client = poly_client
     app.state.kalshi_client = kalshi_client
     app.state.security_settings = sec_settings
@@ -1771,6 +1801,120 @@ def create_app(
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # Multi-Factor Market Drivers, Separate Stocks & Crypto AI Councils, and Forecast Learning
+    # ------------------------------------------------------------------
+    @app.get("/api/market-intelligence/overview")
+    async def market_intelligence_overview(
+        horizon: str = Query(default="24H", pattern="^(4H|12H|24H|48H)$"),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        return ai_council_engine.get_overview(horizon=horizon)
+
+    @app.get("/api/market-intelligence/snapshots")
+    async def list_market_driver_snapshots(
+        clean_live_only: bool = Query(default=False),
+        limit: int = Query(default=20, ge=1, le=100),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        items = market_driver_engine.list_snapshots(clean_live_only=clean_live_only, limit=limit)
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/market-intelligence/ingest")
+    async def ingest_market_drivers(
+        _: AuthenticatedUser = Depends(analyst_guard),
+    ) -> dict[str, Any]:
+        try:
+            return await market_driver_engine.ingest_live_snapshot()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Market driver ingestion failed: {sanitize_error_message(exc)}",
+            ) from exc
+
+    @app.post("/api/market-intelligence/councils/convene")
+    async def convene_ai_councils(
+        req: CouncilConveneRequest,
+        _: AuthenticatedUser = Depends(analyst_guard),
+    ) -> dict[str, Any]:
+        snap = None
+        if not req.refresh_drivers:
+            snap = market_driver_engine.get_latest_snapshot(clean_live_only=True)
+        if snap is None:
+            try:
+                snap = await market_driver_engine.ingest_live_snapshot()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Live driver ingestion failed: {sanitize_error_message(exc)}",
+                ) from exc
+        try:
+            res = ai_council_engine.convene_councils(
+                snapshot=snap,
+                councils=req.councils,
+                horizon=req.horizon,
+                create_forecasts=req.create_forecasts,
+            )
+            return {**res, "snapshot": snap}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
+
+    @app.get("/api/market-intelligence/forecasts")
+    async def list_movement_forecasts(
+        council_type: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        clean_live_only: bool = Query(default=False),
+        limit: int = Query(default=50, ge=1, le=200),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        items = ai_council_engine.list_forecasts(
+            council_type=council_type,
+            status=status,
+            clean_live_only=clean_live_only,
+            limit=limit,
+        )
+        return {
+            "count": len(items),
+            "calibration_live_only": ai_council_engine.get_clean_calibration_metrics(
+                council_type=council_type.upper() if council_type in ("CRYPTO", "STOCKS", "crypto", "stocks") else None,  # type: ignore[arg-type]
+                include_non_live=False,
+            ),
+            "items": items,
+        }
+
+    @app.post("/api/market-intelligence/forecasts/{forecast_id}/resolve")
+    async def resolve_movement_forecast(
+        forecast_id: str,
+        req: ForecastResolveRequest,
+        user: AuthenticatedUser = Depends(operator_guard),
+    ) -> dict[str, Any]:
+        try:
+            return ai_council_engine.resolve_forecast(
+                forecast_id,
+                actual_price=req.actual_price,
+                void_reason=req.void_reason,
+                reviewer_id=user.username,
+            )
+        except ValueError as exc:
+            msg = sanitize_error_message(exc)
+            code = 404 if "Unknown forecast_id" in msg else 400
+            raise HTTPException(status_code=code, detail=msg) from exc
+
+    @app.post("/api/market-intelligence/forecasts/resolve-due")
+    async def resolve_due_movement_forecasts(
+        req: ForecastResolveDueRequest,
+        _: AuthenticatedUser = Depends(operator_guard),
+    ) -> dict[str, Any]:
+        try:
+            return await ai_council_engine.resolve_due_forecasts(
+                force_all_live=req.force_all_live
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Auto-resolution failed: {sanitize_error_message(exc)}",
+            ) from exc
 
     # ------------------------------------------------------------------
     # Kalshi Read-Only, Cross-Venue & Paper Execution Routes

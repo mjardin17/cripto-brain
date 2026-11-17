@@ -6,6 +6,7 @@ import { AuthGateView } from './components/AuthGateView';
 import { CommandCenterView } from './components/CommandCenterView';
 import { CrossVenuePaperView } from './components/CrossVenuePaperView';
 import { IntelligenceCenterView } from './components/IntelligenceCenterView';
+import { MarketCouncilsView } from './components/MarketCouncilsView';
 import { MemoryArchitectureView } from './components/MemoryArchitectureView';
 import { RiskGateAuditView } from './components/RiskGateAuditView';
 import { ScannerView } from './components/ScannerView';
@@ -21,6 +22,7 @@ import type {
   IntelligenceCommandCenterPayload,
   KalshiMarketSummary,
   MarketBookSnapshotResponse,
+  MarketIntelligenceOverview,
   PaperBlotterResponse,
 } from './types/certainty';
 import { canAccessWorkspaceTab, type RiskDryRunFormState } from './utils/formatters';
@@ -62,6 +64,8 @@ export default function App() {
   const [intelligenceData, setIntelligenceData] =
     useState<IntelligenceCommandCenterPayload | null>(null);
   const [intelligenceLoading, setIntelligenceLoading] = useState(false);
+  const [marketIntelData, setMarketIntelData] = useState<MarketIntelligenceOverview | null>(null);
+  const [marketIntelLoading, setMarketIntelLoading] = useState(false);
 
   const resetWorkspaceState = useCallback(() => {
     setDashboard(null);
@@ -73,6 +77,7 @@ export default function App() {
     setCrossOpps([]);
     setPaperBlotter(null);
     setIntelligenceData(null);
+    setMarketIntelData(null);
     setActiveTab('command');
   }, []);
 
@@ -182,6 +187,18 @@ export default function App() {
     }
   }, []);
 
+  const loadMarketIntel = useCallback(async () => {
+    setMarketIntelLoading(true);
+    try {
+      const res = await certaintyApi.getMarketIntelligenceOverview('24H');
+      setMarketIntelData(res);
+    } catch {
+      // Surfaced via MarketCouncilsView action/error handlers
+    } finally {
+      setMarketIntelLoading(false);
+    }
+  }, []);
+
   const loadAll = useCallback(
     async (probeVenues = true) => {
       try {
@@ -222,6 +239,7 @@ export default function App() {
     void loadAll(true);
     void loadKalshiMarkets();
     void loadIntelligenceCenter();
+    void loadMarketIntel();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser?.user_id]);
 
@@ -402,6 +420,7 @@ export default function App() {
           onRefresh={() => {
             void loadAll(true);
             void loadIntelligenceCenter();
+            void loadMarketIntel();
           }}
           onOpenChangePassword={() => {
             setPasswordError(null);
@@ -509,6 +528,17 @@ export default function App() {
                   onSelectMarket={(id) => void loadSelectedBook(id)}
                   onRunScan={() => void handleRunScan()}
                   onNavigateTab={(tab) => setActiveTab(tab)}
+                />
+              ) : null}
+
+              {activeTab === 'councils' ? (
+                <MarketCouncilsView
+                  data={marketIntelData}
+                  loading={marketIntelLoading}
+                  permissions={authUser.permissions}
+                  onRefresh={async () => {
+                    await Promise.all([loadMarketIntel(), loadIntelligenceCenter(), loadAll(false)]);
+                  }}
                 />
               ) : null}
 

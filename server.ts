@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import express, { type Request, type Response } from 'express';
 
@@ -13,6 +14,7 @@ const FASTAPI_ORIGIN = `http://${FASTAPI_HOST}:${FASTAPI_PORT}`;
 
 let pythonProc: ChildProcess | null = null;
 let shuttingDown = false;
+let bootstrapPromise: Promise<string> | null = null;
 
 async function pythonHasBackendDeps(pythonBin: string): Promise<boolean> {
   try {
@@ -27,9 +29,66 @@ async function pythonHasBackendDeps(pythonBin: string): Promise<boolean> {
   }
 }
 
-async function ensurePythonEnvironment(): Promise<string> {
-  const venvPython = path.resolve(process.cwd(), '.venv/bin/python');
-  if (fs.existsSync(venvPython) && await pythonHasBackendDeps(venvPython)) {
+async function pythonHasPip(pythonBin: string): Promise<boolean> {
+  try {
+    await execFileAsync(pythonBin, ['-m', 'pip', '--version'], {
+      cwd: process.cwd(),
+      timeout: 10000,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensurePipInVenv(venvPython: string): Promise<void> {
+  if (await pythonHasPip(venvPython)) {
+    return;
+  }
+  try {
+    await execFileAsync(venvPython, ['-m', 'ensurepip', '--upgrade'], {
+      cwd: process.cwd(),
+      timeout: 60000,
+      maxBuffer: 5 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (await pythonHasPip(venvPython)) {
+      return;
+    }
+  } catch {
+    // Ubuntu/Debian containers omit ensurepip unless python3-venv is installed
+  }
+
+  console.log('[server] Bootstrapping pip inside .venv via get-pip.py...');
+  const resp = await fetch('https://bootstrap.pypa.io/get-pip.py');
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch get-pip.py: HTTP ${resp.status}`);
+  }
+  const script = await resp.text();
+  const tmpScript = path.join(os.tmpdir(), `certainty-get-pip-${process.pid}.py`);
+  fs.writeFileSync(tmpScript, script, 'utf8');
+  try {
+    await execFileAsync(venvPython, [tmpScript, '-q', '--no-warn-script-location'], {
+      cwd: process.cwd(),
+      timeout: 180000,
+      maxBuffer: 10 * 1024 * 1024,
+      windowsHide: true,
+    });
+  } finally {
+    try {
+      fs.unlinkSync(tmpScript);
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+}
+
+async function bootstrapPythonEnvironment(): Promise<string> {
+  const venvDir = path.resolve(process.cwd(), '.venv');
+  const venvPython = path.resolve(venvDir, 'bin/python');
+  if (fs.existsSync(venvPython) && (await pythonHasBackendDeps(venvPython))) {
     return venvPython;
   }
   if (await pythonHasBackendDeps('python3')) {
@@ -37,21 +96,43 @@ async function ensurePythonEnvironment(): Promise<string> {
   }
   const reqFile = path.resolve(process.cwd(), 'requirements.txt');
   console.log('[server] Python backend dependencies missing; bootstrapping .venv from requirements.txt...');
-  if (!fs.existsSync(venvPython)) {
-    await execFileAsync('python3', ['-m', 'venv', '.venv'], {
-      cwd: process.cwd(),
-      timeout: 120000,
-      maxBuffer: 5 * 1024 * 1024,
-      windowsHide: true,
-    });
+
+  if (!fs.existsSync(venvPython) || !(await pythonHasPip(venvPython))) {
+    try {
+      await execFileAsync('python3', ['-m', 'venv', '--clear', venvDir], {
+        cwd: process.cwd(),
+        timeout: 120000,
+        maxBuffer: 5 * 1024 * 1024,
+        windowsHide: true,
+      });
+    } catch {
+      fs.rmSync(venvDir, { recursive: true, force: true });
+      await execFileAsync('python3', ['-m', 'venv', '--without-pip', venvDir], {
+        cwd: process.cwd(),
+        timeout: 120000,
+        maxBuffer: 5 * 1024 * 1024,
+        windowsHide: true,
+      });
+    }
+    await ensurePipInVenv(venvPython);
   }
-  await execFileAsync(venvPython, ['-m', 'pip', 'install', '-q', '-r', reqFile], {
+
+  await execFileAsync(venvPython, ['-m', 'pip', 'install', '--no-cache-dir', '-q', '-r', reqFile], {
     cwd: process.cwd(),
     timeout: 300000,
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
   });
   return venvPython;
+}
+
+async function ensurePythonEnvironment(): Promise<string> {
+  if (!bootstrapPromise) {
+    bootstrapPromise = bootstrapPythonEnvironment().finally(() => {
+      bootstrapPromise = null;
+    });
+  }
+  return bootstrapPromise;
 }
 
 async function startFastApiBackend(): Promise<void> {
@@ -71,7 +152,7 @@ async function startFastApiBackend(): Promise<void> {
     ],
     {
       cwd: process.cwd(),
-      env: { ...process.env },
+      env: { ...process.env, PYTHONPATH: process.cwd() },
       stdio: ['ignore', 'pipe', 'pipe'],
     }
   );

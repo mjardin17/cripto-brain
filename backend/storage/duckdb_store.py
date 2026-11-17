@@ -774,6 +774,87 @@ class DuckDBStore:
                 )
                 """
             )
+            # Market Intelligence, Stocks/Crypto AI Councils & Movement Forecasts (additive)
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_driver_snapshots (
+                    snapshot_id VARCHAR PRIMARY KEY,
+                    provenance VARCHAR NOT NULL,
+                    verified_clean BOOLEAN NOT NULL,
+                    btc_price_usd DOUBLE,
+                    eth_price_usd DOUBLE,
+                    spy_price_usd DOUBLE,
+                    qqq_price_usd DOUBLE,
+                    ibit_price_usd DOUBLE,
+                    fear_greed_value INTEGER,
+                    btc_funding_rate DOUBLE,
+                    asset_summary_json VARCHAR NOT NULL,
+                    correlations_json VARCHAR NOT NULL,
+                    derivatives_json VARCHAR NOT NULL,
+                    sentiment_json VARCHAR NOT NULL,
+                    macro_news_json VARCHAR NOT NULL,
+                    why_drivers_json VARCHAR NOT NULL,
+                    when_signals_json VARCHAR NOT NULL,
+                    feed_health_json VARCHAR NOT NULL,
+                    data_freshness_ms BIGINT NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS council_deliberations (
+                    deliberation_id VARCHAR PRIMARY KEY,
+                    council_type VARCHAR NOT NULL,
+                    snapshot_id VARCHAR NOT NULL,
+                    provenance VARCHAR NOT NULL,
+                    verified_clean BOOLEAN NOT NULL,
+                    target_symbol VARCHAR NOT NULL,
+                    horizon VARCHAR NOT NULL,
+                    regime_verdict VARCHAR NOT NULL,
+                    directional_bias VARCHAR NOT NULL,
+                    significant_move_prob DOUBLE NOT NULL,
+                    up_prob DOUBLE NOT NULL,
+                    confidence DOUBLE NOT NULL,
+                    why_explanation VARCHAR NOT NULL,
+                    when_explanation VARCHAR NOT NULL,
+                    agent_opinions_json VARCHAR NOT NULL,
+                    challenges_json VARCHAR NOT NULL,
+                    dissent_summary VARCHAR NOT NULL,
+                    risk_warnings_json VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS movement_forecasts (
+                    forecast_id VARCHAR PRIMARY KEY,
+                    deliberation_id VARCHAR NOT NULL,
+                    council_type VARCHAR NOT NULL,
+                    symbol VARCHAR NOT NULL,
+                    horizon VARCHAR NOT NULL,
+                    move_threshold_pct DOUBLE NOT NULL,
+                    predicted_move_prob DOUBLE NOT NULL,
+                    predicted_up_prob DOUBLE NOT NULL,
+                    confidence DOUBLE NOT NULL,
+                    baseline_price DOUBLE,
+                    provenance VARCHAR NOT NULL,
+                    verified_clean BOOLEAN NOT NULL,
+                    status VARCHAR NOT NULL,
+                    resolve_after VARCHAR NOT NULL,
+                    actual_price DOUBLE,
+                    actual_return_pct DOUBLE,
+                    actual_outcome INTEGER,
+                    brier_score DOUBLE,
+                    log_loss DOUBLE,
+                    learning_cycle_id VARCHAR,
+                    rationale VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL,
+                    resolved_at VARCHAR
+                )
+                """
+            )
 
     def _seed_initial_memory_if_empty(self) -> None:
         with self._lock:
@@ -1749,6 +1830,9 @@ class DuckDBStore:
                 "SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL"
             ).fetchone()[0]
             sec_audits = self._conn.execute("SELECT COUNT(*) FROM security_audit_log").fetchone()[0]
+            md_snaps = self._conn.execute("SELECT COUNT(*) FROM market_driver_snapshots").fetchone()[0]
+            councils = self._conn.execute("SELECT COUNT(*) FROM council_deliberations").fetchone()[0]
+            mforecasts = self._conn.execute("SELECT COUNT(*) FROM movement_forecasts").fetchone()[0]
             return {
                 "snapshots": int(snaps),
                 "opportunities": int(opps),
@@ -1776,6 +1860,9 @@ class DuckDBStore:
                 "users": int(users_cnt),
                 "active_sessions": int(active_sess),
                 "security_audit_logs": int(sec_audits),
+                "market_driver_snapshots": int(md_snaps),
+                "council_deliberations": int(councils),
+                "movement_forecasts": int(mforecasts),
             }
 
     def close(self) -> None:
