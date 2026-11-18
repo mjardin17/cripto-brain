@@ -209,6 +209,9 @@ async function proxyApiRequest(req: Request, res: Response): Promise<void> {
   if (req.headers['x-csrf-token']) {
     headers['x-csrf-token'] = String(req.headers['x-csrf-token']);
   }
+  if (req.headers['authorization']) {
+    headers['authorization'] = String(req.headers['authorization']);
+  }
   if (req.headers['origin']) {
     headers['origin'] = String(req.headers['origin']);
   }
@@ -219,10 +222,22 @@ async function proxyApiRequest(req: Request, res: Response): Promise<void> {
     headers['user-agent'] = String(req.headers['user-agent']);
   }
 
-  // Forward verified socket IP and transport protocol to FastAPI trusted local proxy
+  // Forward verified socket IP, upstream proto, and host to FastAPI trusted local proxy
   const clientIp = req.ip || req.socket.remoteAddress || '127.0.0.1';
-  headers['x-forwarded-for'] = clientIp;
-  headers['x-forwarded-proto'] = req.protocol || 'http';
+  const rawXff = req.headers['x-forwarded-for'];
+  const upstreamXff = Array.isArray(rawXff) ? rawXff.join(', ') : rawXff;
+  headers['x-forwarded-for'] = upstreamXff ? `${upstreamXff}, ${clientIp}` : clientIp;
+
+  const rawProto = req.headers['x-forwarded-proto'];
+  const firstProto = (Array.isArray(rawProto) ? rawProto[0] : rawProto)?.split(',')[0]?.trim().toLowerCase();
+  headers['x-forwarded-proto'] =
+    firstProto === 'https' || firstProto === 'http' ? firstProto : req.protocol || 'http';
+
+  const rawHost = req.headers['x-forwarded-host'] || req.headers.host;
+  const firstHost = (Array.isArray(rawHost) ? rawHost[0] : rawHost)?.split(',')[0]?.trim();
+  if (firstHost) {
+    headers['x-forwarded-host'] = firstHost;
+  }
 
   const hasBody = !['GET', 'HEAD'].includes(req.method.toUpperCase());
   const body = hasBody && req.body !== undefined ? JSON.stringify(req.body) : undefined;

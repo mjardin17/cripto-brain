@@ -37,26 +37,60 @@ export function AuthGateView({
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [cookiesBlockedNotice, setCookiesBlockedNotice] = useState(false);
+
+  const verifySessionOrFallbackAndEnter = async (
+    uname: string,
+    pw: string,
+    user: AuthenticatedUserRecord
+  ) => {
+    let check = await certaintyApi.getAuthStatus();
+    if (!check.authenticated || !check.user) {
+      // Browser blocked third-party iframe cookies; seamlessly activate tab-scoped Bearer+CSRF fallback
+      const fallbackRes = await certaintyApi.login({
+        username: uname,
+        password: pw,
+        issue_bearer_fallback: true,
+      });
+      check = await certaintyApi.getAuthStatus();
+      if (check.authenticated && check.user) {
+        setCookiesBlockedNotice(false);
+        onAuthenticated(check.user ?? fallbackRes.user ?? user);
+        return;
+      }
+      setCookiesBlockedNotice(true);
+      setErrorMsg(
+        'Credentials were accepted by the server, but your browser blocked session persistence inside this embedded preview.'
+      );
+      await onRefreshStatus();
+      return;
+    }
+    setCookiesBlockedNotice(false);
+    onAuthenticated(check.user ?? user);
+  };
 
   const handleBootstrapSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setCookiesBlockedNotice(false);
     if (ownerPassword !== ownerConfirmPassword) {
       setErrorMsg('Passwords do not match.');
       return;
     }
+    const cleanUser = ownerUsername.trim();
+    const rawPw = ownerPassword;
     setSubmitting(true);
     try {
       const res = await certaintyApi.bootstrapOwner({
-        username: ownerUsername.trim(),
-        password: ownerPassword,
+        username: cleanUser,
+        password: rawPw,
         email: ownerEmail.trim() || undefined,
         bootstrap_token: bootstrapToken.trim() || undefined,
       });
+      await verifySessionOrFallbackAndEnter(cleanUser, rawPw, res.user);
       setOwnerPassword('');
       setOwnerConfirmPassword('');
       setBootstrapToken('');
-      onAuthenticated(res.user);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Initial OWNER enrollment failed');
       await onRefreshStatus();
@@ -69,14 +103,17 @@ export function AuthGateView({
     e.preventDefault();
     setErrorMsg(null);
     setResetSuccessMsg(null);
+    setCookiesBlockedNotice(false);
+    const cleanUser = username.trim();
+    const rawPw = password;
     setSubmitting(true);
     try {
       const res = await certaintyApi.login({
-        username: username.trim(),
-        password,
+        username: cleanUser,
+        password: rawPw,
       });
+      await verifySessionOrFallbackAndEnter(cleanUser, rawPw, res.user);
       setPassword('');
-      onAuthenticated(res.user);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Authentication failed');
     } finally {
@@ -144,9 +181,21 @@ export function AuthGateView({
         {errorMsg ? (
           <div
             role="alert"
-            className="px-4 py-3 rounded-lg border border-rose-800/70 bg-rose-950/30 text-xs text-rose-200"
+            className="px-4 py-3 rounded-lg border border-rose-800/70 bg-rose-950/30 text-xs text-rose-200 space-y-2"
           >
-            {errorMsg}
+            <div>{errorMsg}</div>
+            {cookiesBlockedNotice && typeof window !== 'undefined' ? (
+              <div className="pt-1">
+                <a
+                  href={window.location.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-semibold transition-colors"
+                >
+                  Open Workspace in New Tab
+                </a>
+              </div>
+            ) : null}
           </div>
         ) : null}
 

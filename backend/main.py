@@ -65,11 +65,16 @@ from backend.security import (
     load_security_settings,
     validate_security_settings,
 )
-from backend.security.config import SESSION_COOKIE_NAME, resolve_client_ip
+from backend.security.config import (
+    SESSION_COOKIE_NAME,
+    resolve_client_ip,
+    resolve_cookie_attributes,
+)
 from backend.security.dependencies import (
     clear_auth_cookies,
     enforce_rate_limit_check,
     enforce_tls_and_origin,
+    extract_session_token,
     make_guard,
     optional_authenticated_user,
     set_auth_cookies,
@@ -145,6 +150,7 @@ class BootstrapOwnerRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
+    issue_bearer_fallback: bool = False
 
 
 class ChangePasswordRequest(BaseModel):
@@ -399,7 +405,7 @@ class AdversarialReviewRequest(BaseModel):
     opposing_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class CouncilConveneRequest(BaseModel):
+class MarketCouncilConveneRequest(BaseModel):
     councils: list[CouncilType] | None = None
     horizon: str = Field(default="24H", pattern="^(4H|12H|24H|48H)$")
     refresh_drivers: bool = True
@@ -508,7 +514,7 @@ def create_app(
         allow_origins=list(sec_settings.allowed_origins),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Accept", CSRF_HEADER_NAME],
+        allow_headers=["Content-Type", "Accept", CSRF_HEADER_NAME, "Authorization"],
     )
 
     @app.middleware("http")
@@ -578,11 +584,12 @@ def create_app(
             require_origin_for_unsafe=False,
         )
         user = optional_authenticated_user(request)
+        effective_cookie_secure, _, _ = resolve_cookie_attributes(request, sec_settings)
         return {
             "authenticated": user is not None,
             "needs_owner_bootstrap": auth_manager.needs_owner_bootstrap(),
             "env_mode": sec_settings.env_mode,
-            "cookie_secure": sec_settings.cookie_secure,
+            "cookie_secure": effective_cookie_secure,
             "tls_required": sec_settings.is_production and sec_settings.require_tls_in_production,
             "csrf_header_name": CSRF_HEADER_NAME,
             "user": user.to_public_dict() if user else None,
@@ -627,10 +634,12 @@ def create_app(
             session_token=sess["session_token"],
             csrf_token=sess["csrf_token"],
             settings=sec_settings,
+            request=request,
         )
         return {
             "enrolled": True,
             "user": sess["user"],
+            "csrf_token": sess["csrf_token"],
             "expires_at": sess["expires_at"],
         }
 
@@ -656,14 +665,14 @@ def create_app(
             bucket_class="LOGIN_USER",
             identifier=f"uname:{req.username.strip().lower()}",
         )
-        prior_cookie = request.cookies.get(SESSION_COOKIE_NAME)
+        prior_token, _ = extract_session_token(request)
         try:
             sess = auth_manager.login(
                 username=req.username,
                 password=req.password,
                 ip_address=client_ip,
                 user_agent=request.headers.get("user-agent", "unknown"),
-                prior_session_token=prior_cookie,
+                prior_session_token=prior_token,
             )
         except PermissionError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
@@ -673,12 +682,17 @@ def create_app(
             session_token=sess["session_token"],
             csrf_token=sess["csrf_token"],
             settings=sec_settings,
+            request=request,
         )
-        return {
+        payload: dict[str, Any] = {
             "authenticated": True,
             "user": sess["user"],
+            "csrf_token": sess["csrf_token"],
             "expires_at": sess["expires_at"],
         }
+        if req.issue_bearer_fallback:
+            payload["bearer_token"] = sess["session_token"]
+        return payload
 
     @app.post("/api/auth/logout")
     async def logout(
@@ -687,7 +701,7 @@ def create_app(
         user: AuthenticatedUser = Depends(read_only_guard),
     ) -> dict[str, Any]:
         client_ip = resolve_client_ip(request, sec_settings)
-        raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+        raw_token, _ = extract_session_token(request)
         if raw_token:
             auth_manager.revoke_session_by_token(raw_token, reason="User logged out")
         auth_manager.record_audit_event(
@@ -701,7 +715,7 @@ def create_app(
             role=user.role,
             detail={"session_id": user.session_id},
         )
-        clear_auth_cookies(response, settings=sec_settings)
+        clear_auth_cookies(response, settings=sec_settings, request=request)
         return {"logged_out": True}
 
     @app.get("/api/auth/me")
@@ -716,6 +730,7 @@ def create_app(
         user: AuthenticatedUser = Depends(read_only_guard),
     ) -> dict[str, Any]:
         client_ip = resolve_client_ip(request, sec_settings)
+        _, from_cookie = extract_session_token(request)
         try:
             sess = auth_manager.change_password(
                 actor=user,
@@ -734,12 +749,17 @@ def create_app(
             session_token=sess["session_token"],
             csrf_token=sess["csrf_token"],
             settings=sec_settings,
+            request=request,
         )
-        return {
+        payload: dict[str, Any] = {
             "password_changed": True,
             "user": sess["user"],
+            "csrf_token": sess["csrf_token"],
             "expires_at": sess["expires_at"],
         }
+        if not from_cookie:
+            payload["bearer_token"] = sess["session_token"]
+        return payload
 
     @app.post("/api/auth/reset-password/confirm")
     async def confirm_password_reset(
@@ -768,7 +788,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        clear_auth_cookies(response, settings=sec_settings)
+        clear_auth_cookies(response, settings=sec_settings, request=request)
         return res
 
     @app.get("/api/auth/sessions")
@@ -796,7 +816,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         if session_id == user.session_id:
-            clear_auth_cookies(response, settings=sec_settings)
+            clear_auth_cookies(response, settings=sec_settings, request=request)
         return res
 
     # ------------------------------------------------------------------
@@ -1835,7 +1855,7 @@ def create_app(
 
     @app.post("/api/market-intelligence/councils/convene")
     async def convene_ai_councils(
-        req: CouncilConveneRequest,
+        req: MarketCouncilConveneRequest,
         _: AuthenticatedUser = Depends(analyst_guard),
     ) -> dict[str, Any]:
         snap = None

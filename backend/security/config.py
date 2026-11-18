@@ -205,9 +205,47 @@ def resolve_request_scheme(request: Request, settings: SecuritySettings) -> str:
     if not is_trusted_proxy_peer(request, settings):
         return scheme
     xfp = request.headers.get("x-forwarded-proto", "").strip().lower()
-    if xfp in ("http", "https"):
-        return xfp
+    if xfp:
+        first_proto = xfp.split(",")[0].strip()
+        if first_proto in ("http", "https"):
+            return first_proto
     return scheme
+
+
+def resolve_request_host(request: Request, settings: SecuritySettings) -> str:
+    """Return effective host; honor X-Forwarded-Host ONLY from trusted proxies."""
+    host_header = request.headers.get("host", "").strip().lower()
+    if is_trusted_proxy_peer(request, settings):
+        xfh = request.headers.get("x-forwarded-host", "").strip().lower()
+        if xfh:
+            first_host = xfh.split(",")[0].strip()
+            if first_host:
+                return first_host
+    return host_header
+
+
+def resolve_cookie_attributes(
+    request: Request | None, settings: SecuritySettings
+) -> tuple[bool, str, bool]:
+    """Resolve (secure, samesite, partitioned) for auth cookies.
+
+    Over HTTPS (including AI Studio Preview cross-site iframes), emit
+    Secure + SameSite=None + Partitioned (CHIPS) unless explicitly pinned
+    to SameSite=strict, so browsers transmit HttpOnly session cookies inside
+    embedded previews as well as top-level tabs.
+    Over plain HTTP (localhost / TestClient), keep secure=False and SameSite=lax.
+    """
+    eff_scheme = (
+        resolve_request_scheme(request, settings)
+        if request is not None
+        else ("https" if settings.cookie_secure else "http")
+    )
+    if eff_scheme == "https":
+        samesite = "strict" if settings.cookie_samesite == "strict" else "none"
+        return True, samesite, True
+    if settings.cookie_secure:
+        return True, settings.cookie_samesite, False
+    return False, settings.cookie_samesite, False
 
 
 def normalize_origin(url_or_origin: str | None) -> str:
@@ -227,8 +265,8 @@ def is_allowed_origin(origin: str, settings: SecuritySettings, request: Request)
     allowed_set = {normalize_origin(o) for o in settings.allowed_origins if o != "*"}
     if norm in allowed_set:
         return True
-    # Also permit same-origin request matching effective scheme + Host header in dev/test
-    host_header = request.headers.get("host", "").strip().lower()
+    # Also permit same-origin request matching effective scheme + Host / X-Forwarded-Host header
+    host_header = resolve_request_host(request, settings)
     if host_header:
         eff_scheme = resolve_request_scheme(request, settings)
         if norm == f"{eff_scheme}://{host_header}":

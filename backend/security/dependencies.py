@@ -14,9 +14,19 @@ from backend.security.config import (
     SecuritySettings,
     is_allowed_origin,
     resolve_client_ip,
+    resolve_cookie_attributes,
     resolve_request_scheme,
 )
 from backend.security.rate_limit import DuckDBRateLimiter
+
+
+def _append_partitioned_to_latest_cookie(response: Response) -> None:
+    for idx in range(len(response.raw_headers) - 1, -1, -1):
+        name, val = response.raw_headers[idx]
+        if name.lower() == b"set-cookie":
+            if b"partitioned" not in val.lower():
+                response.raw_headers[idx] = (name, val + b"; Partitioned")
+            break
 
 
 def set_auth_cookies(
@@ -25,40 +35,56 @@ def set_auth_cookies(
     session_token: str,
     csrf_token: str,
     settings: SecuritySettings,
+    request: Request | None = None,
 ) -> None:
+    secure, samesite, partitioned = resolve_cookie_attributes(request, settings)
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session_token,
         httponly=True,
-        secure=settings.cookie_secure,
-        samesite=settings.cookie_samesite,  # type: ignore[arg-type]
+        secure=secure,
+        samesite=samesite,  # type: ignore[arg-type]
         max_age=settings.session_ttl_seconds,
         path="/",
     )
+    if partitioned:
+        _append_partitioned_to_latest_cookie(response)
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=csrf_token,
         httponly=False,  # Readable by frontend SPA for X-CSRF-Token double-submit
-        secure=settings.cookie_secure,
-        samesite=settings.cookie_samesite,  # type: ignore[arg-type]
+        secure=secure,
+        samesite=samesite,  # type: ignore[arg-type]
         max_age=settings.session_ttl_seconds,
         path="/",
     )
+    if partitioned:
+        _append_partitioned_to_latest_cookie(response)
 
 
-def clear_auth_cookies(response: Response, *, settings: SecuritySettings) -> None:
+def clear_auth_cookies(
+    response: Response,
+    *,
+    settings: SecuritySettings,
+    request: Request | None = None,
+) -> None:
+    secure, samesite, partitioned = resolve_cookie_attributes(request, settings)
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         path="/",
-        secure=settings.cookie_secure,
-        samesite=settings.cookie_samesite,  # type: ignore[arg-type]
+        secure=secure,
+        samesite=samesite,  # type: ignore[arg-type]
     )
+    if partitioned:
+        _append_partitioned_to_latest_cookie(response)
     response.delete_cookie(
         key=CSRF_COOKIE_NAME,
         path="/",
-        secure=settings.cookie_secure,
-        samesite=settings.cookie_samesite,  # type: ignore[arg-type]
+        secure=secure,
+        samesite=samesite,  # type: ignore[arg-type]
     )
+    if partitioned:
+        _append_partitioned_to_latest_cookie(response)
 
 
 def enforce_tls_and_origin(
@@ -146,9 +172,22 @@ def enforce_rate_limit_check(
         )
 
 
+def extract_session_token(request: Request) -> tuple[str | None, bool]:
+    """Return (raw_session_token, from_cookie) preferring HttpOnly cookie over Bearer fallback."""
+    cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if cookie_token:
+        return cookie_token, True
+    auth_header = request.headers.get("authorization", "").strip()
+    if auth_header.lower().startswith("bearer "):
+        bearer_token = auth_header[7:].strip()
+        if len(bearer_token) >= 16:
+            return bearer_token, False
+    return None, False
+
+
 def optional_authenticated_user(request: Request) -> AuthenticatedUser | None:
     auth_manager: AuthManager = request.app.state.auth_manager
-    raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+    raw_token, _ = extract_session_token(request)
     return auth_manager.validate_session(raw_token)
 
 
@@ -175,7 +214,7 @@ def make_guard(
             require_origin_for_unsafe=True,
         )
 
-        raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+        raw_token, from_cookie = extract_session_token(request)
         user = auth_manager.validate_session(raw_token)
         if user is None:
             auth_manager.record_audit_event(
@@ -184,7 +223,7 @@ def make_guard(
                 ip_address=client_ip,
                 endpoint=request.url.path,
                 method=request.method,
-                detail={"has_cookie": bool(raw_token)},
+                detail={"has_cookie": bool(raw_token and from_cookie)},
             )
             raise HTTPException(
                 status_code=401,
@@ -196,12 +235,15 @@ def make_guard(
         if do_csrf:
             csrf_header = request.headers.get(CSRF_HEADER_NAME)
             csrf_cookie = request.cookies.get(CSRF_COOKIE_NAME)
-            if (
-                not csrf_header
-                or not csrf_cookie
-                or csrf_header.strip() != csrf_cookie.strip()
-                or not auth_manager.verify_csrf(user, csrf_header)
-            ):
+            csrf_ok = (
+                bool(csrf_header)
+                and auth_manager.verify_csrf(user, csrf_header)
+                and (
+                    not from_cookie
+                    or (bool(csrf_cookie) and csrf_header.strip() == csrf_cookie.strip())
+                )
+            )
+            if not csrf_ok:
                 auth_manager.record_audit_event(
                     event_type="CSRF_VALIDATION_BLOCK",
                     outcome="DENIED",

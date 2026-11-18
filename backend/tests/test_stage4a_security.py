@@ -756,3 +756,142 @@ def test_disposable_phase3e_to_stage4a_migration_preserves_existing_data(tmp_pat
         assert legacy_pred == (0.75,)
     finally:
         store.close()
+
+
+# ----------------------------------------------------------------------
+# 12. HTTPS Reverse-Proxy Cross-Site Iframe Cookie Policy (CHIPS / SameSite=None)
+# ----------------------------------------------------------------------
+
+
+def test_https_proxy_emits_partitioned_samesite_none_cookies_for_iframe_preview(tmp_path):
+    settings = SecuritySettings(
+        env_mode="development",
+        session_secret="k" * 48,
+        cookie_secure=False,
+        trusted_proxies=("127.0.0.1", "testclient"),
+        rate_limit_enabled=False,
+    )
+    app = create_app(
+        db_path=str(tmp_path / "iframe_cookies.duckdb"),
+        enable_background_loop=False,
+        security_settings=settings,
+    )
+    preview_host = "ais-dev-example.us-east1.run.app"
+    preview_origin = f"https://{preview_host}"
+
+    # Plain HTTP request preserves SameSite=lax without Secure
+    http_client = TestClient(app)
+    http_status = http_client.get("/api/auth/status")
+    assert http_status.status_code == 200
+    assert http_status.json()["cookie_secure"] is False
+
+    # Proxied HTTPS request (e.g. Cloud Run -> Express -> FastAPI) emits Secure; SameSite=none; Partitioned
+    with TestClient(app, base_url=preview_origin) as client:
+        proxy_headers = {
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": preview_host,
+            "Origin": preview_origin,
+        }
+        https_status = client.get("/api/auth/status", headers=proxy_headers)
+        assert https_status.status_code == 200
+        assert https_status.json()["cookie_secure"] is True
+
+        boot = client.post(
+            "/api/auth/bootstrap-owner",
+            headers=proxy_headers,
+            json={"username": "iframe_owner", "password": OWNER_PW},
+        )
+        assert boot.status_code == 200, boot.text
+        assert boot.json()["csrf_token"]
+        set_cookies = boot.headers.get_list("set-cookie")
+        sess_hdr = next(h for h in set_cookies if h.startswith("certainty_session="))
+        csrf_hdr = next(h for h in set_cookies if h.startswith("certainty_csrf="))
+        for hdr in (sess_hdr, csrf_hdr):
+            lower = hdr.lower()
+            assert "secure" in lower
+            assert "samesite=none" in lower
+            assert "partitioned" in lower
+        assert "httponly" in sess_hdr.lower()
+        assert "httponly" not in csrf_hdr.lower()
+
+        # Subsequent authenticated mutation using X-Forwarded-Host Origin + CSRF succeeds
+        sync_csrf_header(client)
+        mem = client.post(
+            "/api/memory",
+            headers=proxy_headers,
+            json={
+                "category": "VERIFIED_LESSON",
+                "title": "Iframe proxy session check",
+                "summary": "Verify session persists cleanly across HTTPS iframe proxy.",
+            },
+        )
+        assert mem.status_code == 200, mem.text
+
+        # Default login does NOT expose bearer_token in JSON
+        normal_login = client.post(
+            "/api/auth/login",
+            headers=proxy_headers,
+            json={"username": "iframe_owner", "password": OWNER_PW},
+        )
+        assert normal_login.status_code == 200
+        assert "bearer_token" not in normal_login.json()
+
+        # Cookie-blocked iframe client uses issue_bearer_fallback=True and sends no cookies
+        fb_login = client.post(
+            "/api/auth/login",
+            headers=proxy_headers,
+            json={"username": "iframe_owner", "password": OWNER_PW, "issue_bearer_fallback": True},
+        )
+        assert fb_login.status_code == 200
+        bearer_tok = fb_login.json()["bearer_token"]
+        fb_csrf = fb_login.json()["csrf_token"]
+        assert len(bearer_tok) >= 16
+
+        cookieless = TestClient(app, base_url=preview_origin)
+        cookieless.cookies.clear()
+        auth_st = cookieless.get(
+            "/api/auth/status",
+            headers={**proxy_headers, "Authorization": f"Bearer {bearer_tok}"},
+        )
+        assert auth_st.status_code == 200
+        assert auth_st.json()["authenticated"] is True
+
+        # Unsafe POST without X-CSRF-Token still fails closed 403
+        no_csrf_fb = cookieless.post(
+            "/api/memory",
+            headers={**proxy_headers, "Authorization": f"Bearer {bearer_tok}"},
+            json={"category": "TEST", "title": "No CSRF", "summary": "Should 403"},
+        )
+        assert no_csrf_fb.status_code == 403
+
+        # With X-CSRF-Token + Origin + Bearer, mutation succeeds and logout revokes
+        ok_fb = cookieless.post(
+            "/api/memory",
+            headers={
+                **proxy_headers,
+                "Authorization": f"Bearer {bearer_tok}",
+                "X-CSRF-Token": fb_csrf,
+            },
+            json={
+                "category": "VERIFIED_LESSON",
+                "title": "Cookie-blocked iframe session",
+                "summary": "Bearer + CSRF fallback verified cleanly.",
+            },
+        )
+        assert ok_fb.status_code == 200
+
+        out_fb = cookieless.post(
+            "/api/auth/logout",
+            headers={
+                **proxy_headers,
+                "Authorization": f"Bearer {bearer_tok}",
+                "X-CSRF-Token": fb_csrf,
+            },
+        )
+        assert out_fb.status_code == 200
+        after_out = cookieless.get(
+            "/api/auth/status",
+            headers={**proxy_headers, "Authorization": f"Bearer {bearer_tok}"},
+        )
+        assert after_out.json()["authenticated"] is False
+

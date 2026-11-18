@@ -62,6 +62,47 @@ export class ApiError extends Error {
 
 let unauthorizedHandler: ((detail: string) => void) | null = null;
 let forbiddenHandler: ((detail: string) => void) | null = null;
+let inMemoryCsrfToken: string | null = null;
+let inMemoryBearerToken: string | null = null;
+
+const SESSION_BEARER_KEY = 'certainty_iframe_bearer';
+const SESSION_CSRF_KEY = 'certainty_iframe_csrf';
+
+function readFallbackStorage(key: string): string | null {
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      return window.sessionStorage.getItem(key);
+    }
+  } catch {
+    // Sandboxed iframe may restrict sessionStorage; in-memory fallback remains active
+  }
+  return null;
+}
+
+function setFallbackSession(bearerToken: string | null, csrfToken: string | null): void {
+  inMemoryBearerToken = bearerToken;
+  inMemoryCsrfToken = csrfToken;
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      if (bearerToken) {
+        window.sessionStorage.setItem(SESSION_BEARER_KEY, bearerToken);
+      } else {
+        window.sessionStorage.removeItem(SESSION_BEARER_KEY);
+      }
+      if (csrfToken) {
+        window.sessionStorage.setItem(SESSION_CSRF_KEY, csrfToken);
+      } else {
+        window.sessionStorage.removeItem(SESSION_CSRF_KEY);
+      }
+    }
+  } catch {
+    // Ignore storage access errors in strict sandboxed frames
+  }
+}
+
+export function clearFallbackSession(): void {
+  setFallbackSession(null, null);
+}
 
 export function registerAuthHandlers(handlers: {
   onUnauthorized?: (detail: string) => void;
@@ -83,14 +124,26 @@ function getCsrfTokenFromCookie(): string | null {
   return null;
 }
 
+export function hasSessionCookieReadable(): boolean {
+  return Boolean(getCsrfTokenFromCookie());
+}
+
 async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const method = (init?.method || 'GET').toUpperCase();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...((init?.headers as Record<string, string> | undefined) ?? {}),
   };
+  const cookieCsrf = getCsrfTokenFromCookie();
+  const fallbackBearer = inMemoryBearerToken ?? readFallbackStorage(SESSION_BEARER_KEY);
+  const fallbackCsrf = inMemoryCsrfToken ?? readFallbackStorage(SESSION_CSRF_KEY);
+
+  if (!cookieCsrf && fallbackBearer && !headers['Authorization']) {
+    headers['Authorization'] = `Bearer ${fallbackBearer}`;
+  }
+
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-    const csrf = getCsrfTokenFromCookie();
+    const csrf = cookieCsrf ?? fallbackCsrf;
     if (csrf) {
       headers['X-CSRF-Token'] = csrf;
     }
@@ -117,6 +170,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
       url.startsWith('/api/auth/bootstrap-owner') ||
       url.startsWith('/api/auth/reset-password');
     if (parsed.status === 401 && !isAuthAttempt && unauthorizedHandler) {
+      clearFallbackSession();
       unauthorizedHandler(detail);
     } else if (parsed.status === 403 && !isAuthAttempt && forbiddenHandler) {
       forbiddenHandler(detail);
@@ -486,54 +540,97 @@ export const certaintyApi = {
   // Stage 4A: Authentication, Sessions, Users & Security Audit Log
   getAuthStatus: () => apiFetch<AuthStatusResponse>('/api/auth/status'),
 
-  bootstrapOwner: (payload: {
+  bootstrapOwner: async (payload: {
     username: string;
     password: string;
     email?: string;
     bootstrap_token?: string;
-  }) =>
-    apiFetch<{ enrolled: boolean; user: AuthenticatedUserRecord; expires_at: string }>(
-      '/api/auth/bootstrap-owner',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }
-    ),
-
-  login: (payload: { username: string; password: string }) =>
-    apiFetch<{ authenticated: boolean; user: AuthenticatedUserRecord; expires_at: string }>(
-      '/api/auth/login',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }
-    ),
-
-  logout: () =>
-    apiFetch<{ logged_out: boolean }>('/api/auth/logout', {
+  }) => {
+    clearFallbackSession();
+    const res = await apiFetch<{
+      enrolled: boolean;
+      user: AuthenticatedUserRecord;
+      csrf_token?: string;
+      expires_at: string;
+    }>('/api/auth/bootstrap-owner', {
       method: 'POST',
-      body: JSON.stringify({}),
-    }),
+      body: JSON.stringify(payload),
+    });
+    if (res.csrf_token) {
+      inMemoryCsrfToken = res.csrf_token;
+    }
+    return res;
+  },
+
+  login: async (payload: {
+    username: string;
+    password: string;
+    issue_bearer_fallback?: boolean;
+  }) => {
+    if (!payload.issue_bearer_fallback) {
+      clearFallbackSession();
+    }
+    const res = await apiFetch<{
+      authenticated: boolean;
+      user: AuthenticatedUserRecord;
+      csrf_token?: string;
+      bearer_token?: string;
+      expires_at: string;
+    }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (res.bearer_token) {
+      setFallbackSession(res.bearer_token, res.csrf_token ?? null);
+    } else if (res.csrf_token) {
+      inMemoryCsrfToken = res.csrf_token;
+    }
+    return res;
+  },
+
+  logout: async () => {
+    try {
+      return await apiFetch<{ logged_out: boolean }>('/api/auth/logout', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+    } finally {
+      clearFallbackSession();
+    }
+  },
 
   getMe: () => apiFetch<{ user: AuthenticatedUserRecord }>('/api/auth/me'),
 
-  changePassword: (payload: { current_password: string; new_password: string }) =>
-    apiFetch<{ password_changed: boolean; user: AuthenticatedUserRecord; expires_at: string }>(
-      '/api/auth/change-password',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }
-    ),
+  changePassword: async (payload: { current_password: string; new_password: string }) => {
+    const res = await apiFetch<{
+      password_changed: boolean;
+      user: AuthenticatedUserRecord;
+      csrf_token?: string;
+      bearer_token?: string;
+      expires_at: string;
+    }>('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (res.bearer_token) {
+      setFallbackSession(res.bearer_token, res.csrf_token ?? null);
+    } else if (res.csrf_token) {
+      inMemoryCsrfToken = res.csrf_token;
+    }
+    return res;
+  },
 
-  confirmPasswordReset: (payload: { reset_token: string; new_password: string }) =>
-    apiFetch<{ reset_completed: boolean; username: string; sessions_revoked: number }>(
+  confirmPasswordReset: async (payload: { reset_token: string; new_password: string }) => {
+    const res = await apiFetch<{ reset_completed: boolean; username: string; sessions_revoked: number }>(
       '/api/auth/reset-password/confirm',
       {
         method: 'POST',
         body: JSON.stringify(payload),
       }
-    ),
+    );
+    clearFallbackSession();
+    return res;
+  },
 
   getOwnSessions: () =>
     apiFetch<{ count: number; items: SessionRecord[] }>('/api/auth/sessions'),

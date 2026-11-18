@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { ApiError, certaintyApi, registerAuthHandlers } from './api/client';
 import { AdminAccessView } from './components/AdminAccessView';
@@ -30,6 +30,8 @@ import { canAccessWorkspaceTab, type RiskDryRunFormState } from './utils/formatt
 export default function App() {
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
   const [authUser, setAuthUser] = useState<AuthenticatedUserRecord | null>(null);
+  const authUserRef = useRef<AuthenticatedUserRecord | null>(null);
+  authUserRef.current = authUser;
   const [authChecking, setAuthChecking] = useState(true);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [forbiddenNotice, setForbiddenNotice] = useState<string | null>(null);
@@ -113,6 +115,8 @@ export default function App() {
   useEffect(() => {
     registerAuthHandlers({
       onUnauthorized: (detail) => {
+        if (!authUserRef.current) return;
+        authUserRef.current = null;
         setAuthUser(null);
         resetWorkspaceState();
         setSessionNotice(
