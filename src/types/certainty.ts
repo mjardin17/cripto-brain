@@ -726,6 +726,8 @@ export interface PaperPositionRecord {
   updated_at: string;
 }
 
+export type PaperResolutionResult = 'PENDING' | 'YES' | 'NO' | 'VOID';
+
 export interface PaperPnlLedgerRecord {
   ledger_id: string;
   execution_id: string;
@@ -741,6 +743,13 @@ export interface PaperPnlLedgerRecord {
   notes: string;
   provenance: DataProvenance;
   recorded_at: string;
+  resolution_result?: PaperResolutionResult;
+  resolution_notes?: string;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  learning_cycle_id?: string | null;
+  linked_prediction_id?: string | null;
+  arena_model_id?: string | null;
 }
 
 export interface PaperSummary {
@@ -755,6 +764,8 @@ export interface PaperSummary {
   total_fees_usd: number;
   total_matched_shares: number;
   total_unwound_shares: number;
+  resolved_entries_count?: number;
+  pending_resolution_count?: number;
 }
 
 export interface PaperBlotterResponse {
@@ -765,6 +776,16 @@ export interface PaperBlotterResponse {
   fills: PaperFillRecord[];
   positions: PaperPositionRecord[];
   pnl_ledger: PaperPnlLedgerRecord[];
+}
+
+export interface PaperBlotterResolveResponse {
+  provenance: DataProvenance;
+  live_trading_enabled: boolean;
+  entry: PaperPnlLedgerRecord;
+  summary: PaperSummary;
+  learning_cycle_id: string;
+  learning_cycle: LearningCycleRecord;
+  resolved_prediction: PredictionRecord | null;
 }
 
 export interface PaperExecuteResponse {
@@ -1004,6 +1025,48 @@ export interface ModelRoutingEvent {
   created_at: string;
 }
 
+export interface ModelProviderRecord {
+  provider_id: string;
+  display_name: string;
+  kind: 'DETERMINISTIC' | 'LOCAL_OPEN_WEIGHT' | 'FREE_TIER_API' | 'ECONOMICAL_PAID';
+  status: 'AVAILABLE' | 'UNAVAILABLE' | 'RATE_LIMITED';
+  provenance: DataProvenance;
+  api_key_configured: boolean;
+  api_key_exposed_to_frontend: boolean;
+  env_var_names: string[];
+  default_model: string;
+  models: string[];
+  capabilities: string[];
+  cost_per_1m_input_usd: number;
+  cost_per_1m_output_usd: number;
+  rpm_limit: number | null;
+  daily_request_limit: number | null;
+  requests_today: number;
+  cooldown_until: string | null;
+  rate_limit_hits: number;
+  last_probe_at: string | null;
+  last_error: string | null;
+  endpoint_hint: string;
+}
+
+export interface ModelProviderRegistry {
+  fallback_order: string[];
+  available_ai_providers: string[];
+  providers: ModelProviderRecord[];
+  daily_spent_usd: number;
+  daily_budget_usd: number;
+  per_task_limit_usd: number;
+  api_key_exposed_to_frontend: boolean;
+  checked_at: string;
+}
+
+export interface LearningRegressionMonitorResponse {
+  checked_at: string;
+  failing_cases_count: number;
+  failing_case_ids: string[];
+  rolled_back_cycle_ids: string[];
+}
+
 export interface ModelRoutingSummary {
   provider: string;
   provider_status: 'AVAILABLE' | 'UNAVAILABLE';
@@ -1015,6 +1078,7 @@ export interface ModelRoutingSummary {
     daily_budget_usd: number;
     deterministic_first: boolean;
     economical_model: string;
+    fallback_order?: string[];
   };
   daily_spent_usd: number;
   remaining_daily_budget_usd: number;
@@ -1029,6 +1093,9 @@ export interface ModelRoutingSummary {
       cost_usd: number;
     }
   >;
+  providers?: ModelProviderRecord[];
+  available_ai_providers?: string[];
+  fallback_order?: string[];
   recent_events: ModelRoutingEvent[];
 }
 
@@ -1571,6 +1638,41 @@ export interface CouncilDeliberationRecord {
   created_at: string;
 }
 
+export interface DriverSignalAttribution {
+  driver_id: string;
+  category: string;
+  impact_score: number;
+  magnitude: number;
+  applied_weight: number;
+}
+
+export interface DriverLearningWeightRecord {
+  weight_key: string;
+  council_type: 'CRYPTO' | 'STOCKS';
+  driver_id: string;
+  weight: number;
+  sample_count: number;
+  hit_count: number;
+  miss_count: number;
+  cumulative_skill: number;
+  last_forecast_id: string | null;
+  last_learning_cycle_id: string | null;
+  updated_at: string;
+}
+
+export interface MarketSchedulerState {
+  enabled: boolean;
+  cadence_seconds: number;
+  running_cycle: boolean;
+  cycles_completed: number;
+  total_auto_resolved: number;
+  total_auto_convened: number;
+  last_run_at: string | null;
+  last_status: string;
+  last_snapshot_id: string | null;
+  last_error: string | null;
+}
+
 export interface MovementForecastRecord {
   forecast_id: string;
   deliberation_id: string;
@@ -1590,8 +1692,11 @@ export interface MovementForecastRecord {
   actual_return_pct: number | null;
   actual_outcome: number | null;
   brier_score: number | null;
+  directional_brier_score?: number | null;
+  directional_hit?: boolean | null;
   log_loss: number | null;
   learning_cycle_id: string | null;
+  driver_signals?: DriverSignalAttribution[];
   rationale: string;
   created_at: string;
   resolved_at: string | null;
@@ -1604,7 +1709,9 @@ export interface CleanCalibrationMetrics {
   voided_count: number;
   excluded_non_live_or_unverified_count: number;
   mean_brier_score: number | null;
+  mean_directional_brier_score?: number | null;
   mean_log_loss: number | null;
+  move_accuracy_pct?: number | null;
   directional_accuracy_pct: number | null;
   expected_calibration_error: number | null;
 }
@@ -1618,10 +1725,149 @@ export interface MarketIntelligenceOverview {
   stocks_council: CouncilDeliberationRecord | null;
   recent_deliberations: CouncilDeliberationRecord[];
   forecasts: MovementForecastRecord[];
+  driver_weights?: DriverLearningWeightRecord[];
+  scheduler_state?: MarketSchedulerState;
   calibration_live_only: CleanCalibrationMetrics;
   crypto_calibration: CleanCalibrationMetrics;
   stocks_calibration: CleanCalibrationMetrics;
   generated_at: string;
 }
+
+export interface SolanaConfigRecord {
+  starting_balance_usd: number;
+  max_position_fraction: number;
+  hard_stop_fraction: number;
+  trailing_activation_fraction: number;
+  trailing_drawdown_fraction: number;
+  min_lp_locked_pct: number;
+  max_top10_holders_pct: number;
+  min_volume_1h_usd: number;
+  min_analyst_score: number;
+}
+
+export interface SolanaCandidateEvidence {
+  volume_1h_usd: number | null;
+  mint_authority_revoked: boolean | null;
+  freeze_authority_revoked: boolean | null;
+  lp_locked_pct: number | null;
+  top10_holders_pct: number | null;
+  dev_wallet_clear: boolean | null;
+  sell_simulation_passed: boolean | null;
+  evidence_sources?: string[];
+  collected_at?: string;
+}
+
+export interface SolanaCandidateRecord {
+  mint: string;
+  symbol: string;
+  pair_address: string | null;
+  dex_id: string | null;
+  source: string;
+  price_usd: number | null;
+  liquidity_usd: number | null;
+  volume_1h_usd: number | null;
+  status: 'DISCOVERED' | 'REJECTED' | 'NO_TRADE' | 'PAPER_QUOTE_REQUIRED' | 'PAPER_ENTERED' | string;
+  analyst_score: number | null;
+  analyst_rationale: string | null;
+  analyst_provider: string | null;
+  rejection_reasons: string[];
+  evidence: SolanaCandidateEvidence;
+  raw_evidence: Record<string, unknown>;
+  provenance: DataProvenance;
+  discovered_at: string;
+  updated_at: string;
+}
+
+export interface SolanaPositionRecord {
+  position_id: string;
+  mint: string;
+  symbol: string;
+  entry_price: number;
+  mark_price: number;
+  peak_price: number;
+  notional_usd: number;
+  trailing_active: boolean;
+  status: 'OPEN' | 'CLOSED' | string;
+  exit_reason: string | null;
+  realized_pnl_usd: number;
+  realized_pnl_pct: number;
+  provenance: DataProvenance;
+  opened_at: string;
+  updated_at: string;
+  closed_at: string | null;
+}
+
+export interface SolanaEventRecord {
+  event_id: string;
+  agent: 'SCOUT' | 'FILTER' | 'ANALYST' | 'EXECUTOR' | 'RISK' | 'LOGGER' | string;
+  event_type: string;
+  mint: string | null;
+  details: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface SolanaLedgerSummary {
+  provenance: DataProvenance;
+  starting_balance_usd: number;
+  cash_balance_usd: number;
+  open_positions_value_usd: number;
+  total_equity_usd: number;
+  max_next_notional_usd: number;
+  unrealized_pnl_usd: number;
+  realized_pnl_usd: number;
+  open_count: number;
+  closed_count: number;
+  win_rate_pct: number;
+  avg_realized_pnl_pct: number;
+  hard_stop_exits: number;
+  trailing_stop_exits: number;
+}
+
+export interface SolanaOverviewResponse {
+  provenance: DataProvenance;
+  live_trading_enabled: boolean;
+  kill_switch_active: boolean;
+  config: SolanaConfigRecord;
+  ledger: SolanaLedgerSummary;
+  candidates: SolanaCandidateRecord[];
+  positions: SolanaPositionRecord[];
+  events: SolanaEventRecord[];
+}
+
+export interface SolanaDiscoverResponse {
+  provenance: DataProvenance;
+  live_trading_enabled: boolean;
+  count: number;
+  checked_at: string;
+  items: SolanaCandidateRecord[];
+}
+
+export interface SolanaEvaluateResponse {
+  status: string;
+  agent?: string;
+  reason?: string;
+  reasons?: string[];
+  score?: number;
+  analyst_provider?: string;
+  max_notional_usd?: number;
+  candidate?: SolanaCandidateRecord | null;
+  live_trading_enabled: boolean;
+}
+
+export interface SolanaPaperOpenResponse {
+  position: SolanaPositionRecord;
+  balance_usd: number;
+  provenance: DataProvenance;
+  live_trading_enabled: boolean;
+}
+
+export interface SolanaPaperMarkResponse {
+  provenance: DataProvenance;
+  live_trading_enabled: boolean;
+  balance_usd: number;
+  updated_positions: SolanaPositionRecord[];
+  closed_positions: SolanaPositionRecord[];
+}
+
 
 

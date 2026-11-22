@@ -61,6 +61,7 @@ class SupervisorOrchestrator:
         scanner: Any = None,
         cross_scanner: Any = None,
         model_router: Any = None,
+        solana_desk: Any = None,
     ) -> None:
         self.store = store
         self.risk_gate = risk_gate
@@ -69,6 +70,7 @@ class SupervisorOrchestrator:
         self.scanner = scanner
         self.cross_scanner = cross_scanner
         self.model_router = model_router
+        self.solana_desk = solana_desk
         self.blocker_engine = BlockerRecoveryEngine(store=store, memory=memory, learning=learning)
 
         # Stage 3D/3E: Lifecycle-managed background Supervisor loop state & uptime telemetry
@@ -1058,6 +1060,7 @@ class SupervisorOrchestrator:
             learning=self.learning,
             scanner=self.scanner,
             cross_scanner=self.cross_scanner,
+            solana_desk=self.solana_desk,
             custom_handlers=custom_handlers,
         )
 

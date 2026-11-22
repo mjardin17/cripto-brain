@@ -15,6 +15,7 @@ import {
 import { HistoricalEdgeChart } from './HistoricalEdgeChart';
 import { OrderBookInspector } from './OrderBookInspector';
 import { ProvenanceLabel } from './ProvenanceLabel';
+import type { WorkspaceTab } from './SidebarNav';
 
 interface CommandCenterViewProps {
   dashboard: DashboardPayload;
@@ -26,9 +27,32 @@ interface CommandCenterViewProps {
   scanning: boolean;
   onSelectMarket: (marketId: string) => void;
   onRunScan: () => void;
-  onNavigateTab: (tab: 'risk' | 'scanner' | 'cross_venue' | 'architecture') => void;
+  onNavigateTab: (tab: WorkspaceTab) => void;
   canRunScans?: boolean;
+  isOwner?: boolean;
 }
+
+const UNIFIED_PLATFORM_VIEWS: Array<{
+  title: string;
+  tab: WorkspaceTab;
+  provenance: string;
+  ownerOnly?: boolean;
+}> = [
+  { title: 'Executive Command Center', tab: 'command', provenance: 'LIVE' },
+  { title: 'Prediction Market Scanner', tab: 'scanner', provenance: 'LIVE' },
+  { title: 'Cross-Venue Arbitrage', tab: 'cross_venue', provenance: 'LIVE' },
+  { title: 'Solana Research Desk', tab: 'solana', provenance: 'SIMULATED' },
+  { title: 'Paper Trading', tab: 'cross_venue', provenance: 'SIMULATED' },
+  { title: 'Position Monitoring', tab: 'solana', provenance: 'SIMULATED' },
+  { title: 'AI Agent Workforce', tab: 'intelligence', provenance: 'LIVE' },
+  { title: 'Learning Core', tab: 'intelligence', provenance: 'LIVE' },
+  { title: 'Memory Architecture', tab: 'architecture', provenance: 'LIVE' },
+  { title: 'Model Provider Management', tab: 'intelligence', provenance: 'LIVE' },
+  { title: 'Risk Gate', tab: 'risk', provenance: 'LIVE' },
+  { title: 'Security & Audit', tab: 'access', provenance: 'LIVE', ownerOnly: true },
+  { title: 'Historical Performance', tab: 'councils', provenance: 'SIMULATED' },
+  { title: 'System Health', tab: 'intelligence', provenance: 'LIVE' },
+];
 
 export function CommandCenterView({
   dashboard,
@@ -42,6 +66,7 @@ export function CommandCenterView({
   onRunScan,
   onNavigateTab,
   canRunScans = true,
+  isOwner = false,
 }: CommandCenterViewProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMode, setFilterMode] = useState<OpportunityFilter>('ALL');
@@ -134,6 +159,40 @@ export function CommandCenterView({
               Manage
             </button>
           </div>
+        </div>
+      </section>
+
+      {/* Unified Command Center Directory (14 Core Subsystems) */}
+      <section aria-label="Unified platform module directory" className="border border-slate-800 bg-[#111827] rounded-xl p-4 space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs font-semibold text-slate-200">
+            Unified Research &amp; Simulation Subsystems (14 Views · Paper Only)
+          </div>
+          <span className="font-mono text-[11px] text-slate-400">
+            LIVE = Read-Only Telemetry · SIMULATED = Paper Ledger
+          </span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-7 gap-2 text-xs">
+          {UNIFIED_PLATFORM_VIEWS.map((view) => {
+            const targetTab: WorkspaceTab = view.ownerOnly && !isOwner ? 'risk' : view.tab;
+            return (
+              <button
+                key={view.title}
+                type="button"
+                onClick={() => onNavigateTab(targetTab)}
+                className="p-2.5 rounded-lg bg-[#0E1522] hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
+              >
+                <div className="font-medium text-slate-200 truncate">{view.title}</div>
+                <div
+                  className={`mt-0.5 font-mono text-[10px] font-semibold ${
+                    view.provenance === 'SIMULATED' ? 'text-amber-400' : 'text-emerald-400'
+                  }`}
+                >
+                  {view.provenance}
+                </div>
+              </button>
+            );
+          })}
         </div>
       </section>
 

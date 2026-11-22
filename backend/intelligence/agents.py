@@ -62,10 +62,11 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
     "MARKET_INTELLIGENCE": AgentProfile(
         role="MARKET_INTELLIGENCE",
         agent_id="market_intelligence_agent",
-        description="Read-only Polymarket/Kalshi discovery, order-book ingestion, freshness checks, and feed anomaly recording.",
+        description="Read-only Polymarket/Kalshi/Solana discovery, order-book & pool ingestion, freshness checks, and feed anomaly recording.",
         permitted_actions=(
             "READ_POLYMARKET_PUBLIC",
             "READ_KALSHI_PUBLIC",
+            "READ_SOLANA_PUBLIC",
             "READ_DUCKDB",
             "WRITE_MEMORY_CANDIDATE",
             "BOUNDED_BACKOFF_RETRY",
@@ -73,21 +74,34 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
             "USE_VERIFIED_RESEARCH_USER_AGENT",
         ),
         forbidden_actions=FORBIDDEN_GLOBAL_ACTIONS,
-        supports_task_types=("SCAN_POLYMARKET", "SCAN_CROSS_VENUE", "CHECK_FEED_HEALTH", "COUNCIL_SESSION"),
+        supports_task_types=(
+            "SCAN_POLYMARKET",
+            "SCAN_CROSS_VENUE",
+            "CHECK_FEED_HEALTH",
+            "COUNCIL_SESSION",
+            "SOLANA_DISCOVER",
+            "SOLANA_MARK_POSITIONS",
+        ),
     ),
     "ARBITRAGE_RESEARCH": AgentProfile(
         role="ARBITRAGE_RESEARCH",
         agent_id="arbitrage_research_agent",
-        description="Evaluates persisted intra-venue and cross-venue opportunities, settlement flags, and thin-leg depth limits.",
+        description="Evaluates persisted intra-venue, cross-venue, and Solana pool opportunities, settlement/token safety flags, and depth limits.",
         permitted_actions=(
             "READ_DUCKDB",
+            "READ_SOLANA_PUBLIC",
             "ANALYZE_ARBITRAGE",
+            "ANALYZE_SOLANA_CANDIDATE",
             "WRITE_MEMORY_CANDIDATE",
             "SUBMIT_LEARNING_CYCLE",
             "REDUCE_RESEARCH_SHARE_SIZE",
         ),
         forbidden_actions=FORBIDDEN_GLOBAL_ACTIONS,
-        supports_task_types=("ARBITRAGE_ANALYSIS", "EVALUATE_OPPORTUNITY_DEPTH"),
+        supports_task_types=(
+            "ARBITRAGE_ANALYSIS",
+            "EVALUATE_OPPORTUNITY_DEPTH",
+            "SOLANA_EVALUATE_CANDIDATE",
+        ),
     ),
     "PROBABILITY_RESEARCH": AgentProfile(
         role="PROBABILITY_RESEARCH",
@@ -114,12 +128,12 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
             "RECOMMEND_CONSERVATIVE_THROTTLE",
         ),
         forbidden_actions=FORBIDDEN_GLOBAL_ACTIONS,
-        supports_task_types=("AUDIT_RISK_STATE", "REVIEW_CANDIDATE_LESSONS"),
+        supports_task_types=("AUDIT_RISK_STATE", "REVIEW_CANDIDATE_LESSONS", "SOLANA_RISK_AUDIT"),
     ),
     "LEARNING": AgentProfile(
         role="LEARNING",
         agent_id="learning_agent",
-        description="Runs closed-loop learning consolidation, recurring mistake detection, regression verification, and retention sweeps.",
+        description="Runs closed-loop learning consolidation, recurring mistake detection, regression verification, rollback monitoring, and retention sweeps.",
         permitted_actions=(
             "READ_DUCKDB",
             "INDEPENDENT_MEMORY_REVIEW",
@@ -129,7 +143,13 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
             "SUBMIT_LEARNING_CYCLE",
         ),
         forbidden_actions=FORBIDDEN_GLOBAL_ACTIONS,
-        supports_task_types=("CONSOLIDATE_LEARNING", "RUN_REGRESSION_SUITE", "RUN_RETENTION_SWEEP"),
+        supports_task_types=(
+            "CONSOLIDATE_LEARNING",
+            "RUN_REGRESSION_SUITE",
+            "RUN_RETENTION_SWEEP",
+            "MONITOR_LEARNING_REGRESSIONS",
+            "SOLANA_LEARNING_SYNC",
+        ),
     ),
 }
 
@@ -142,6 +162,7 @@ class AgentExecutionContext:
     learning: LearningEngine
     scanner: PolymarketArbitrageScanner | None = None
     cross_scanner: CrossVenueScanner | None = None
+    solana_desk: Any | None = None
     custom_handlers: dict[str, Callable[[dict[str, Any], dict[str, Any]], Any]] | None = None
 
 
@@ -248,7 +269,73 @@ async def execute_agent_task(
                 "live_trading_enabled": False,
             }
 
+        if task_type == "SOLANA_DISCOVER":
+            if ctx.solana_desk is None:
+                raise RuntimeError("Solana Research Desk unavailable in execution context")
+            query = str(payload.get("query") or "solana")
+            limit = int(payload.get("limit", 12))
+            disc = await ctx.solana_desk.discover_pools(query=query, limit=limit)
+            ctx.memory.record_candidate(
+                memory_tier="WORKING",
+                category="SOLANA_DISCOVERY_NOTE",
+                title=f"Solana pool discovery ({disc['count']} pairs)",
+                summary=f"Discovered {disc['count']} public DEX pairs for query '{query}' (read-only).",
+                source_agent=profile.agent_id,
+                evidence=[{"source_type": "SOLANA_DEXSCREENER", "source_ref_id": query}],
+                confidence=0.76,
+                ttl_hours=12.0,
+            )
+            return {
+                "agent_id": profile.agent_id,
+                "discovered_count": disc["count"],
+                "provenance": disc["provenance"],
+                "live_trading_enabled": False,
+            }
+
+        if task_type == "SOLANA_MARK_POSITIONS":
+            if ctx.solana_desk is None:
+                raise RuntimeError("Solana Research Desk unavailable in execution context")
+            mark = await ctx.solana_desk.mark_positions()
+            return {
+                "agent_id": profile.agent_id,
+                "provenance": "SIMULATED",
+                "updated_count": len(mark["updated_positions"]),
+                "closed_count": len(mark["closed_positions"]),
+                "balance_usd": mark["balance_usd"],
+                "live_trading_enabled": False,
+            }
+
     if role == "ARBITRAGE_RESEARCH":
+        if task_type == "SOLANA_EVALUATE_CANDIDATE":
+            if ctx.solana_desk is None:
+                raise RuntimeError("Solana Research Desk unavailable in execution context")
+            mint = str(payload.get("mint") or "").strip()
+            if not mint:
+                raise ValueError("SOLANA_EVALUATE_CANDIDATE payload requires 'mint'")
+            res = await ctx.solana_desk.evaluate_mint(
+                mint,
+                symbol=payload.get("symbol"),
+                analyst_mode=str(payload.get("analyst_mode") or "ai"),
+                preferred_provider=payload.get("preferred_provider"),
+            )
+            ctx.memory.record_candidate(
+                memory_tier="EPISODIC",
+                category="SOLANA_CANDIDATE_EVAL",
+                title=f"Solana mint {mint[:12]} -> {res.get('status')}",
+                summary=f"Solana safety+analyst evaluation yielded status={res.get('status')} (reasons={res.get('reasons', [])}).",
+                source_agent=profile.agent_id,
+                evidence=[{"source_type": "SOLANA_EVIDENCE", "source_ref_id": mint}],
+                confidence=0.78,
+            )
+            return {
+                "agent_id": profile.agent_id,
+                "mint": mint,
+                "status": res.get("status"),
+                "score": res.get("score"),
+                "reasons": res.get("reasons", []),
+                "live_trading_enabled": False,
+            }
+
         opps = ctx.store.list_opportunities(limit=50, latest_scan_only=False)
         approved = [o for o in opps if o.get("risk_gate_approved")]
         best_net = max((o.get("net_edge_pct") for o in approved if o.get("net_edge_pct") is not None), default=None)
@@ -339,6 +426,27 @@ async def execute_agent_task(
         }
 
     if role == "RISK_INTELLIGENCE":
+        if task_type == "SOLANA_RISK_AUDIT":
+            if ctx.solana_desk is None:
+                raise RuntimeError("Solana Research Desk unavailable in execution context")
+            overview = ctx.solana_desk.get_overview(limit=100)
+            open_pos = [p for p in overview["positions"] if p["status"] == "OPEN"]
+            cap_usd = overview["ledger"]["max_next_notional_usd"]
+            cap_violations = [
+                p["position_id"]
+                for p in open_pos
+                if float(p["notional_usd"]) > float(overview["config"]["starting_balance_usd"]) * 0.25
+            ]
+            return {
+                "agent_id": profile.agent_id,
+                "kill_switch_active": overview["kill_switch_active"],
+                "open_solana_positions": len(open_pos),
+                "next_max_notional_usd": cap_usd,
+                "cap_violations": cap_violations,
+                "live_trading_enabled": False,
+                "risk_policy_immutable": True,
+            }
+
         audits = ctx.store.list_risk_audit(limit=50)
         denied = [a for a in audits if a.get("decision") == "DENIED"]
         paper_summary = ctx.store.get_paper_summary()
@@ -372,14 +480,29 @@ async def execute_agent_task(
         }
 
     if role == "LEARNING":
+        if task_type == "MONITOR_LEARNING_REGRESSIONS":
+            mon = ctx.learning.monitor_regressions(actor=profile.agent_id)
+            return {
+                "agent_id": profile.agent_id,
+                **mon,
+            }
+
         mistakes = ctx.learning.get_recurring_mistakes(min_occurrences=2)
         sweep = ctx.memory.run_retention_sweep(actor=profile.agent_id)
         reg_cases = ctx.learning.list_regression_cases(limit=25)
+        mon = ctx.learning.monitor_regressions(actor=profile.agent_id)
+        solana_closed_exits = (
+            len([p for p in ctx.store.list_solana_positions(status="CLOSED", limit=200)])
+            if ctx.solana_desk is not None
+            else 0
+        )
         return {
             "agent_id": profile.agent_id,
             "recurring_mistakes_count": len(mistakes),
             "archived_memories_count": sweep["archived_count"],
             "regression_cases_count": len(reg_cases),
+            "rolled_back_cycle_ids": mon["rolled_back_cycle_ids"],
+            "solana_closed_exits_reviewed": solana_closed_exits,
         }
 
     raise ValueError(f"Task type '{task_type}' not supported for role '{role}'")

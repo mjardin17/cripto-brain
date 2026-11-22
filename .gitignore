@@ -12,3 +12,4 @@ __pycache__/
 .pytest_cache/
 data/
 .playwright-cli/
+.aistudio/

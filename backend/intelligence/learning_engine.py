@@ -35,6 +35,7 @@ LearningStage = Literal[
     "APPLIED",
     "REJECTED",
     "CONTRADICTED",
+    "ROLLED_BACK",
 ]
 
 
@@ -479,6 +480,93 @@ class LearningEngine:
                 ],
             )
             return self.get_cycle(cycle_id)  # type: ignore[return-value]
+
+    # ------------------------------------------------------------------
+    # Stages 9 & 10: CONTINUOUS REGRESSION MONITORING & ROLLBACK
+    # ------------------------------------------------------------------
+    def rollback_lesson(
+        self,
+        cycle_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Roll back an APPLIED or VERIFIED_LESSON cycle after regression detection or operator audit."""
+        if not reason or len(reason.strip()) < 3:
+            raise ValueError("Rollback reason is required")
+        with self.store._lock:
+            cycle = self.get_cycle(cycle_id)
+            if not cycle:
+                raise ValueError(f"Unknown cycle_id '{cycle_id}'")
+            if cycle["stage"] not in ("APPLIED", "VERIFIED_LESSON"):
+                raise ValueError(
+                    f"Cannot roll back cycle '{cycle_id}' from stage '{cycle['stage']}'"
+                )
+
+            now_iso = utc_now_iso()
+            promoted_id = cycle.get("promoted_memory_id")
+            if promoted_id:
+                mem = self.memory.get_entry(promoted_id)
+                if mem:
+                    self.memory.update_entry(
+                        promoted_id,
+                        changed_by=actor,
+                        change_reason=f"Rolled back learning cycle {cycle_id}: {reason.strip()}",
+                        status="ARCHIVED",
+                    )
+
+            self.store._conn.execute(
+                """
+                UPDATE learning_cycles SET
+                    stage = 'ROLLED_BACK',
+                    applied_flag = FALSE,
+                    review_notes = ?,
+                    updated_at = ?
+                WHERE cycle_id = ?
+                """,
+                [
+                    f"{cycle['review_notes']} | ROLLED_BACK by {actor}: {reason.strip()}".strip(" |"),
+                    now_iso,
+                    cycle_id,
+                ],
+            )
+            self.store.record_system_event(
+                severity="WARNING",
+                component="learning_engine",
+                event_type="LESSON_ROLLED_BACK",
+                message=f"Rolled back cycle {cycle_id} (actor={actor}): {reason.strip()}",
+                detail={"cycle_id": cycle_id, "promoted_memory_id": promoted_id},
+            )
+            return self.get_cycle(cycle_id)  # type: ignore[return-value]
+
+    def monitor_regressions(self, *, actor: str = "learning_monitor") -> dict[str, Any]:
+        """Monitor APPLIED/VERIFIED cycles whose linked regression case is FAILING and roll them back safely."""
+        rolled_back_ids: list[str] = []
+        failing_cases: list[str] = []
+        with self.store._lock:
+            rows = self.store._conn.execute(
+                """
+                SELECT lc.cycle_id, rc.case_id, rc.last_run_detail
+                FROM learning_cycles lc
+                JOIN generated_regression_cases rc ON lc.regression_case_id = rc.case_id
+                WHERE lc.stage IN ('APPLIED', 'VERIFIED_LESSON')
+                  AND rc.status = 'FAILING'
+                """
+            ).fetchall()
+            for cycle_id, case_id, detail in rows:
+                failing_cases.append(str(case_id))
+                self.rollback_lesson(
+                    str(cycle_id),
+                    actor=actor,
+                    reason=f"Regression case {case_id} transitioned to FAILING ({detail or 'invariant mismatch'})",
+                )
+                rolled_back_ids.append(str(cycle_id))
+        return {
+            "checked_at": utc_now_iso(),
+            "failing_cases_count": len(failing_cases),
+            "failing_case_ids": failing_cases,
+            "rolled_back_cycle_ids": rolled_back_ids,
+        }
 
     # ------------------------------------------------------------------
     # Regression Case Generator & Mistake/Recovery Helpers (Priority 4)

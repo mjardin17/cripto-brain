@@ -276,9 +276,37 @@ class DuckDBStore:
                     locked_arb_edge_usd DOUBLE NOT NULL,
                     notes VARCHAR NOT NULL,
                     provenance VARCHAR NOT NULL,
-                    recorded_at VARCHAR NOT NULL
+                    recorded_at VARCHAR NOT NULL,
+                    resolution_result VARCHAR DEFAULT 'PENDING',
+                    resolution_notes VARCHAR DEFAULT '',
+                    resolved_by VARCHAR,
+                    resolved_at VARCHAR,
+                    learning_cycle_id VARCHAR,
+                    linked_prediction_id VARCHAR,
+                    arena_model_id VARCHAR
                 )
                 """
+            )
+            self._conn.execute(
+                "ALTER TABLE paper_pnl_ledger ADD COLUMN IF NOT EXISTS resolution_result VARCHAR DEFAULT 'PENDING'"
+            )
+            self._conn.execute(
+                "ALTER TABLE paper_pnl_ledger ADD COLUMN IF NOT EXISTS resolution_notes VARCHAR DEFAULT ''"
+            )
+            self._conn.execute(
+                "ALTER TABLE paper_pnl_ledger ADD COLUMN IF NOT EXISTS resolved_by VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE paper_pnl_ledger ADD COLUMN IF NOT EXISTS resolved_at VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE paper_pnl_ledger ADD COLUMN IF NOT EXISTS learning_cycle_id VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE paper_pnl_ledger ADD COLUMN IF NOT EXISTS linked_prediction_id VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE paper_pnl_ledger ADD COLUMN IF NOT EXISTS arena_model_id VARCHAR"
             )
             # Phase 3 Stage 3B additive tables (preserve all Phase 1 & Phase 2 tables untouched)
             self._conn.execute(
@@ -851,7 +879,95 @@ class DuckDBStore:
                     learning_cycle_id VARCHAR,
                     rationale VARCHAR NOT NULL,
                     created_at VARCHAR NOT NULL,
-                    resolved_at VARCHAR
+                    resolved_at VARCHAR,
+                    driver_signals_json VARCHAR DEFAULT '[]',
+                    directional_brier_score DOUBLE,
+                    directional_hit BOOLEAN
+                )
+                """
+            )
+            self._conn.execute(
+                "ALTER TABLE movement_forecasts ADD COLUMN IF NOT EXISTS driver_signals_json VARCHAR DEFAULT '[]'"
+            )
+            self._conn.execute(
+                "ALTER TABLE movement_forecasts ADD COLUMN IF NOT EXISTS directional_brier_score DOUBLE"
+            )
+            self._conn.execute(
+                "ALTER TABLE movement_forecasts ADD COLUMN IF NOT EXISTS directional_hit BOOLEAN"
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS driver_learning_weights (
+                    weight_key VARCHAR PRIMARY KEY,
+                    council_type VARCHAR NOT NULL,
+                    driver_id VARCHAR NOT NULL,
+                    weight DOUBLE NOT NULL,
+                    sample_count INTEGER NOT NULL,
+                    hit_count INTEGER NOT NULL,
+                    miss_count INTEGER NOT NULL,
+                    cumulative_skill DOUBLE NOT NULL,
+                    last_forecast_id VARCHAR,
+                    last_learning_cycle_id VARCHAR,
+                    updated_at VARCHAR NOT NULL
+                )
+                """
+            )
+            # Solana Memecoin Research Desk & Paper Ledger tables (additive, zero live execution)
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS solana_candidates (
+                    mint VARCHAR PRIMARY KEY,
+                    symbol VARCHAR NOT NULL,
+                    pair_address VARCHAR,
+                    dex_id VARCHAR,
+                    source VARCHAR NOT NULL,
+                    price_usd DOUBLE,
+                    liquidity_usd DOUBLE,
+                    volume_1h_usd DOUBLE,
+                    status VARCHAR NOT NULL,
+                    analyst_score DOUBLE,
+                    analyst_rationale VARCHAR,
+                    analyst_provider VARCHAR,
+                    rejection_reasons_json VARCHAR NOT NULL,
+                    evidence_json VARCHAR NOT NULL,
+                    raw_evidence_json VARCHAR NOT NULL,
+                    provenance VARCHAR NOT NULL,
+                    discovered_at VARCHAR NOT NULL,
+                    updated_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS solana_paper_positions (
+                    position_id VARCHAR PRIMARY KEY,
+                    mint VARCHAR NOT NULL,
+                    symbol VARCHAR NOT NULL,
+                    entry_price DOUBLE NOT NULL,
+                    mark_price DOUBLE NOT NULL,
+                    peak_price DOUBLE NOT NULL,
+                    notional_usd DOUBLE NOT NULL,
+                    trailing_active BOOLEAN NOT NULL,
+                    status VARCHAR NOT NULL,
+                    exit_reason VARCHAR,
+                    realized_pnl_usd DOUBLE NOT NULL,
+                    realized_pnl_pct DOUBLE NOT NULL,
+                    provenance VARCHAR NOT NULL,
+                    opened_at VARCHAR NOT NULL,
+                    updated_at VARCHAR NOT NULL,
+                    closed_at VARCHAR
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS solana_paper_events (
+                    event_id VARCHAR PRIMARY KEY,
+                    agent VARCHAR NOT NULL,
+                    event VARCHAR NOT NULL,
+                    mint VARCHAR,
+                    details_json VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
                 )
                 """
             )
@@ -1620,11 +1736,34 @@ class DuckDBStore:
             )
 
     def record_paper_pnl(self, entry: dict[str, Any]) -> None:
+        resolution_result = str(entry.get("resolution_result") or "PENDING").strip().upper()
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO paper_pnl_ledger VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                INSERT INTO paper_pnl_ledger (
+                    ledger_id,
+                    execution_id,
+                    pair_id,
+                    event_type,
+                    outcome_status,
+                    matched_shares,
+                    unwound_shares,
+                    gross_cost_usd,
+                    fees_usd,
+                    realized_pnl_usd,
+                    locked_arb_edge_usd,
+                    notes,
+                    provenance,
+                    recorded_at,
+                    resolution_result,
+                    resolution_notes,
+                    resolved_by,
+                    resolved_at,
+                    learning_cycle_id,
+                    linked_prediction_id,
+                    arena_model_id
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 [
@@ -1642,8 +1781,82 @@ class DuckDBStore:
                     entry["notes"],
                     "SIMULATED",
                     entry["recorded_at"],
+                    resolution_result,
+                    str(entry.get("resolution_notes") or ""),
+                    entry.get("resolved_by"),
+                    entry.get("resolved_at"),
+                    entry.get("learning_cycle_id"),
+                    entry.get("linked_prediction_id"),
+                    entry.get("arena_model_id"),
                 ],
             )
+
+    def _normalize_paper_pnl_row(self, row_dict: dict[str, Any]) -> dict[str, Any]:
+        row_dict["resolution_result"] = str(row_dict.get("resolution_result") or "PENDING").upper()
+        row_dict["resolution_notes"] = str(row_dict.get("resolution_notes") or "")
+        return row_dict
+
+    def get_paper_pnl_entry(self, ledger_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM paper_pnl_ledger WHERE ledger_id = ?",
+                [ledger_id],
+            ).fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in self._conn.description]
+            return self._normalize_paper_pnl_row(dict(zip(cols, row)))
+
+    def resolve_paper_pnl_entry(
+        self,
+        ledger_id: str,
+        *,
+        resolution_result: str,
+        resolution_notes: str,
+        resolved_by: str,
+        resolved_at: str,
+        learning_cycle_id: str | None = None,
+        linked_prediction_id: str | None = None,
+        arena_model_id: str | None = None,
+    ) -> dict[str, Any]:
+        norm_result = resolution_result.strip().upper()
+        if norm_result not in ("YES", "NO", "VOID"):
+            raise ValueError("resolution_result must be one of YES, NO, or VOID")
+        with self._lock:
+            existing = self.get_paper_pnl_entry(ledger_id)
+            if not existing:
+                raise ValueError(f"Unknown paper blotter ledger_id '{ledger_id}'")
+            if existing["resolution_result"] != "PENDING":
+                raise ValueError(
+                    f"Paper blotter entry '{ledger_id}' is already resolved as '{existing['resolution_result']}'"
+                )
+            self._conn.execute(
+                """
+                UPDATE paper_pnl_ledger
+                SET
+                    resolution_result = ?,
+                    resolution_notes = ?,
+                    resolved_by = ?,
+                    resolved_at = ?,
+                    learning_cycle_id = ?,
+                    linked_prediction_id = ?,
+                    arena_model_id = ?
+                WHERE ledger_id = ?
+                """,
+                [
+                    norm_result,
+                    resolution_notes.strip()[:600],
+                    resolved_by.strip()[:64],
+                    resolved_at,
+                    learning_cycle_id,
+                    linked_prediction_id,
+                    arena_model_id,
+                    ledger_id,
+                ],
+            )
+            updated = self.get_paper_pnl_entry(ledger_id)
+            assert updated is not None
+            return updated
 
     def list_paper_orders(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
@@ -1675,7 +1888,7 @@ class DuckDBStore:
                 "SELECT * FROM paper_pnl_ledger ORDER BY recorded_at DESC LIMIT ?", [limit]
             ).fetchall()
             cols = [d[0] for d in self._conn.description]
-            return [dict(zip(cols, r)) for r in rows]
+            return [self._normalize_paper_pnl_row(dict(zip(cols, r))) for r in rows]
 
     def get_paper_venue_exposures(self) -> dict[str, float]:
         with self._lock:
@@ -1722,7 +1935,9 @@ class DuckDBStore:
                     COALESCE(SUM(locked_arb_edge_usd), 0.0) AS total_locked_arb_edge_usd,
                     COALESCE(SUM(fees_usd), 0.0) AS total_fees_usd,
                     COALESCE(SUM(matched_shares), 0.0) AS total_matched_shares,
-                    COALESCE(SUM(unwound_shares), 0.0) AS total_unwound_shares
+                    COALESCE(SUM(unwound_shares), 0.0) AS total_unwound_shares,
+                    COALESCE(SUM(CASE WHEN COALESCE(resolution_result, 'PENDING') != 'PENDING' THEN 1 ELSE 0 END), 0) AS resolved_entries_count,
+                    COALESCE(SUM(CASE WHEN COALESCE(resolution_result, 'PENDING') = 'PENDING' THEN 1 ELSE 0 END), 0) AS pending_resolution_count
                 FROM paper_pnl_ledger
                 """
             ).fetchone()
@@ -1738,6 +1953,8 @@ class DuckDBStore:
                 "total_fees_usd": round(float(row[3] or 0.0), 4),
                 "total_matched_shares": round(float(row[4] or 0.0), 4),
                 "total_unwound_shares": round(float(row[5] or 0.0), 4),
+                "resolved_entries_count": int(row[6] or 0),
+                "pending_resolution_count": int(row[7] or 0),
             }
 
     def record_system_event(
@@ -1833,6 +2050,8 @@ class DuckDBStore:
             md_snaps = self._conn.execute("SELECT COUNT(*) FROM market_driver_snapshots").fetchone()[0]
             councils = self._conn.execute("SELECT COUNT(*) FROM council_deliberations").fetchone()[0]
             mforecasts = self._conn.execute("SELECT COUNT(*) FROM movement_forecasts").fetchone()[0]
+            sol_cands = self._conn.execute("SELECT COUNT(*) FROM solana_candidates").fetchone()[0]
+            sol_pos = self._conn.execute("SELECT COUNT(*) FROM solana_paper_positions").fetchone()[0]
             return {
                 "snapshots": int(snaps),
                 "opportunities": int(opps),
@@ -1863,7 +2082,185 @@ class DuckDBStore:
                 "market_driver_snapshots": int(md_snaps),
                 "council_deliberations": int(councils),
                 "movement_forecasts": int(mforecasts),
+                "solana_candidates": int(sol_cands),
+                "solana_paper_positions": int(sol_pos),
             }
+
+    # ------------------------------------------------------------------
+    # Solana Research Desk & Simulated Paper Ledger Persistence
+    # ------------------------------------------------------------------
+    def get_solana_balance_usd(self, default_balance: float = 280.0) -> float:
+        state = self.get_state("solana_paper_balance_usd")
+        if isinstance(state, dict) and "balance_usd" in state:
+            return round(float(state["balance_usd"]), 2)
+        return round(float(default_balance), 2)
+
+    def set_solana_balance_usd(self, balance_usd: float) -> float:
+        val = round(max(0.0, float(balance_usd)), 2)
+        self.set_state("solana_paper_balance_usd", {"balance_usd": val})
+        return val
+
+    def upsert_solana_candidate(self, record: dict[str, Any]) -> dict[str, Any]:
+        now_iso = utc_now_iso()
+        with self._lock:
+            existing = self.get_solana_candidate(record["mint"])
+            discovered_at = (
+                record.get("discovered_at")
+                or (existing.get("discovered_at") if existing else None)
+                or now_iso
+            )
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO solana_candidates VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    record["mint"],
+                    record.get("symbol", "UNKNOWN"),
+                    record.get("pair_address"),
+                    record.get("dex_id"),
+                    record.get("source", "unverified"),
+                    record.get("price_usd"),
+                    record.get("liquidity_usd"),
+                    record.get("volume_1h_usd"),
+                    record.get("status", "REJECTED"),
+                    record.get("analyst_score"),
+                    record.get("analyst_rationale"),
+                    record.get("analyst_provider"),
+                    json.dumps(record.get("rejection_reasons") or []),
+                    json.dumps(record.get("evidence") or {}),
+                    json.dumps(record.get("raw_evidence") or {}),
+                    record.get("provenance", "UNAVAILABLE"),
+                    discovered_at,
+                    now_iso,
+                ],
+            )
+            out = self.get_solana_candidate(record["mint"])
+            assert out is not None
+            return out
+
+    def get_solana_candidate(self, mint: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM solana_candidates WHERE mint = ?", [mint]
+            ).fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in self._conn.description]
+            d = dict(zip(cols, row))
+            d["rejection_reasons"] = json.loads(d.pop("rejection_reasons_json", "[]"))
+            d["evidence"] = json.loads(d.pop("evidence_json", "{}"))
+            d["raw_evidence"] = json.loads(d.pop("raw_evidence_json", "{}"))
+            return d
+
+    def list_solana_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM solana_candidates ORDER BY updated_at DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                d = dict(zip(cols, r))
+                d["rejection_reasons"] = json.loads(d.pop("rejection_reasons_json", "[]"))
+                d["evidence"] = json.loads(d.pop("evidence_json", "{}"))
+                d["raw_evidence"] = json.loads(d.pop("raw_evidence_json", "{}"))
+                out.append(d)
+            return out
+
+    def upsert_solana_position(self, pos: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO solana_paper_positions VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    pos["position_id"],
+                    pos["mint"],
+                    pos["symbol"],
+                    float(pos["entry_price"]),
+                    float(pos["mark_price"]),
+                    float(pos["peak_price"]),
+                    float(pos["notional_usd"]),
+                    bool(pos.get("trailing_active", False)),
+                    pos["status"],
+                    pos.get("exit_reason"),
+                    float(pos.get("realized_pnl_usd", 0.0)),
+                    float(pos.get("realized_pnl_pct", 0.0)),
+                    pos.get("provenance", "SIMULATED"),
+                    pos["opened_at"],
+                    pos.get("updated_at") or utc_now_iso(),
+                    pos.get("closed_at"),
+                ],
+            )
+            row = self._conn.execute(
+                "SELECT * FROM solana_paper_positions WHERE position_id = ?",
+                [pos["position_id"]],
+            ).fetchone()
+            cols = [d[0] for d in self._conn.description]
+            assert row is not None
+            return dict(zip(cols, row))
+
+    def list_solana_positions(
+        self, *, status: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            if status:
+                rows = self._conn.execute(
+                    "SELECT * FROM solana_paper_positions WHERE status = ? ORDER BY updated_at DESC LIMIT ?",
+                    [status.upper(), limit],
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM solana_paper_positions ORDER BY updated_at DESC LIMIT ?",
+                    [limit],
+                ).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+    def add_solana_event(
+        self, *, agent: str, event: str, mint: str | None = None, details: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        ev_id = f"SOLEV-{uuid.uuid4().hex[:10].upper()}"
+        now_iso = utc_now_iso()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO solana_paper_events VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    ev_id,
+                    agent.strip().upper(),
+                    event.strip().upper(),
+                    mint,
+                    json.dumps(details or {}),
+                    now_iso,
+                ],
+            )
+        return {
+            "event_id": ev_id,
+            "agent": agent.strip().upper(),
+            "event": event.strip().upper(),
+            "mint": mint,
+            "details": details or {},
+            "created_at": now_iso,
+        }
+
+    def list_solana_events(self, limit: int = 80) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM solana_paper_events ORDER BY created_at DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                d = dict(zip(cols, r))
+                d["details"] = json.loads(d.pop("details_json", "{}"))
+                out.append(d)
+            return out
 
     def close(self) -> None:
         with self._lock:

@@ -10,14 +10,19 @@ import type {
   PaperBlotterResponse,
   PaperExecuteResponse,
   PaperExecutionScenario,
+  PaperPnlLedgerRecord,
+  PredictionRecord,
   UserPermissions,
 } from '../types/certainty';
 import {
+  canConfirmBlotterResolution,
   formatPct,
   formatPrice,
+  formatScoreMetric,
   formatShares,
   formatTimestampShort,
   formatUsd,
+  summarizeBlotterResolution,
   summarizeExecutionOutcome,
 } from '../utils/formatters';
 import { ProvenanceLabel } from './ProvenanceLabel';
@@ -30,6 +35,7 @@ interface CrossVenuePaperViewProps {
   pairs: CrossVenuePairRecord[];
   crossOpportunities: CrossVenueOpportunityRecord[];
   blotter: PaperBlotterResponse | null;
+  openPredictions?: PredictionRecord[];
   permissions?: UserPermissions;
   onRefreshKalshi: () => Promise<void>;
   onRefreshCrossVenue: () => Promise<void>;
@@ -44,12 +50,14 @@ export function CrossVenuePaperView({
   pairs,
   crossOpportunities,
   blotter,
+  openPredictions = [],
   permissions,
   onRefreshKalshi,
   onRefreshCrossVenue,
 }: CrossVenuePaperViewProps) {
   const canManagePairs = permissions?.can_manage_pairs ?? true;
   const canExecutePaper = permissions?.can_execute_paper_trades ?? true;
+  const canResolveOutcomes = permissions?.can_resolve_predictions ?? canExecutePaper;
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [kalshiBook, setKalshiBook] = useState<KalshiBookSnapshotResponse | null>(null);
   const [kalshiBookLoading, setKalshiBookLoading] = useState(false);
@@ -79,8 +87,65 @@ export function CrossVenuePaperView({
   const [execNotice, setExecNotice] = useState<string | null>(null);
   const [lastExecution, setLastExecution] = useState<PaperExecuteResponse | null>(null);
 
-  // Blotter sub-tab
+  // Blotter sub-tab & manual outcome confirmation flow
   const [blotterTab, setBlotterTab] = useState<BlotterSubTab>('orders');
+  const [confirmingEntry, setConfirmingEntry] = useState<PaperPnlLedgerRecord | null>(null);
+  const [selectedResolution, setSelectedResolution] = useState<'YES' | 'NO' | 'VOID'>('YES');
+  const [resolutionNotes, setResolutionNotes] = useState('');
+  const [linkedPredictionId, setLinkedPredictionId] = useState('');
+  const [arenaModelId, setArenaModelId] = useState('');
+  const [confirmChecked, setConfirmChecked] = useState(false);
+  const [resolveBusy, setResolveBusy] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const [resolveBanner, setResolveBanner] = useState<string | null>(null);
+
+  const openConfirmModal = (entry: PaperPnlLedgerRecord) => {
+    setConfirmingEntry(entry);
+    setSelectedResolution('YES');
+    setResolutionNotes('');
+    setLinkedPredictionId('');
+    setArenaModelId('');
+    setConfirmChecked(false);
+    setResolveError(null);
+  };
+
+  const closeConfirmModal = () => {
+    if (resolveBusy) return;
+    setConfirmingEntry(null);
+    setResolveError(null);
+  };
+
+  const handleConfirmResolution = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!confirmingEntry || !confirmChecked || resolveBusy) return;
+    setResolveBusy(true);
+    setResolveError(null);
+    try {
+      const res = await certaintyApi.resolvePaperBlotterEntry(confirmingEntry.ledger_id, {
+        resolution_result: selectedResolution,
+        notes: resolutionNotes.trim(),
+        linked_prediction_id: linkedPredictionId.trim() || null,
+        arena_model_id: arenaModelId.trim() || null,
+      });
+      const brierDetail =
+        res.resolved_prediction && res.resolved_prediction.brier_score !== null
+          ? ` · Linked forecast ${res.resolved_prediction.prediction_id} scored Brier ${formatScoreMetric(
+              res.resolved_prediction.brier_score
+            )}`
+          : '';
+      await onRefreshCrossVenue();
+      setResolveBanner(
+        `Confirmed ${res.entry.ledger_id} (${res.entry.pair_id}) as ${res.entry.resolution_result} · Learning Cycle ${res.learning_cycle_id} recorded${brierDetail}.`
+      );
+      setConfirmingEntry(null);
+    } catch (err) {
+      setResolveError(
+        err instanceof Error ? err.message : 'Failed to confirm paper blotter outcome.'
+      );
+    } finally {
+      setResolveBusy(false);
+    }
+  };
 
   const handleSelectKalshiTicker = async (ticker: string) => {
     setSelectedTicker(ticker);
@@ -797,7 +862,7 @@ export function CrossVenuePaperView({
         </div>
 
         {/* Blotter KPI summary strip */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 border-b border-slate-800 divide-y lg:divide-y-0 lg:divide-x divide-slate-800 text-xs">
+        <div className="grid grid-cols-2 lg:grid-cols-5 border-b border-slate-800 divide-y lg:divide-y-0 lg:divide-x divide-slate-800 text-xs">
           <div className="p-4">
             <div className="text-slate-400">Simulated Executions</div>
             <div className="mt-1 text-lg font-mono tabular-nums font-semibold text-slate-100">
@@ -831,7 +896,38 @@ export function CrossVenuePaperView({
               {formatUsd(summary?.total_locked_arb_edge_usd ?? 0)}
             </div>
           </div>
+          <div className="p-4">
+            <div className="text-slate-400">Confirmed Outcomes</div>
+            <div className="mt-1 text-lg font-mono tabular-nums font-semibold text-emerald-300">
+              {summary?.resolved_entries_count ??
+                pnlLedger.filter((e) => !summarizeBlotterResolution(e.resolution_result).isPending)
+                  .length}{' '}
+              <span className="text-sm text-slate-500">/ {summary?.executions ?? pnlLedger.length}</span>
+            </div>
+            <div className="text-[11px] font-mono text-slate-500">
+              {summary?.pending_resolution_count ??
+                pnlLedger.filter((e) => summarizeBlotterResolution(e.resolution_result).isPending)
+                  .length}{' '}
+              pending confirmation
+            </div>
+          </div>
         </div>
+
+        {resolveBanner ? (
+          <div
+            role="status"
+            className="px-5 py-2.5 border-b border-emerald-800/70 bg-emerald-950/30 flex items-center justify-between gap-3 text-xs text-emerald-200"
+          >
+            <span className="font-mono">{resolveBanner}</span>
+            <button
+              type="button"
+              onClick={() => setResolveBanner(null)}
+              className="text-emerald-300 hover:text-emerald-100 text-[11px] underline shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
 
         <div className="overflow-x-auto max-h-[360px] overflow-y-auto">
           {blotterTab === 'orders' ? (
@@ -1000,51 +1096,302 @@ export function CrossVenuePaperView({
                     <th className="py-2.5 px-3 text-right">Matched / Unwound</th>
                     <th className="py-2.5 px-3 text-right">Fees</th>
                     <th className="py-2.5 px-3 text-right">Realized Paper P&amp;L</th>
-                    <th className="py-2.5 px-4 text-right">Locked Carry</th>
+                    <th className="py-2.5 px-3 text-right">Locked Carry</th>
+                    <th className="py-2.5 px-4">Resolution Result</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/80">
-                  {pnlLedger.map((entry) => (
-                    <tr key={entry.ledger_id} className="hover:bg-slate-800/30">
-                      <td className="py-2.5 px-4 font-mono">
-                        <div className="text-slate-200">{entry.execution_id}</div>
-                        <div className="text-[11px] text-slate-500">
-                          {formatTimestampShort(entry.recorded_at)}
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 font-mono">
-                        <span className={summarizeExecutionOutcome(entry.outcome_status).toneClass}>
-                          {summarizeExecutionOutcome(entry.outcome_status).label}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-200">
-                        {formatShares(entry.matched_shares)} / {formatShares(entry.unwound_shares)}
-                      </td>
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums text-amber-300">
-                        {formatUsd(entry.fees_usd)}
-                      </td>
-                      <td
-                        className={`py-2.5 px-3 text-right font-mono tabular-nums font-semibold ${
-                          entry.realized_pnl_usd < 0
-                            ? 'text-rose-400'
-                            : entry.realized_pnl_usd > 0
-                              ? 'text-emerald-400'
-                              : 'text-slate-200'
-                        }`}
-                      >
-                        {formatUsd(entry.realized_pnl_usd)}
-                      </td>
-                      <td className="py-2.5 px-4 text-right font-mono tabular-nums text-sky-400">
-                        {formatUsd(entry.locked_arb_edge_usd)}
-                      </td>
-                    </tr>
-                  ))}
+                  {pnlLedger.map((entry) => {
+                    const resBadge = summarizeBlotterResolution(entry.resolution_result);
+                    const allowConfirm = canConfirmBlotterResolution(
+                      entry.resolution_result,
+                      canResolveOutcomes
+                    );
+                    return (
+                      <tr key={entry.ledger_id} className="hover:bg-slate-800/30 align-top">
+                        <td className="py-2.5 px-4 font-mono">
+                          <div className="text-slate-200">{entry.execution_id}</div>
+                          <div className="text-[11px] text-slate-500">
+                            {entry.pair_id} · {formatTimestampShort(entry.recorded_at)}
+                          </div>
+                        </td>
+                        <td className="py-2.5 px-3 font-mono">
+                          <span className={summarizeExecutionOutcome(entry.outcome_status).toneClass}>
+                            {summarizeExecutionOutcome(entry.outcome_status).label}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-200">
+                          {formatShares(entry.matched_shares)} / {formatShares(entry.unwound_shares)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-amber-300">
+                          {formatUsd(entry.fees_usd)}
+                        </td>
+                        <td
+                          className={`py-2.5 px-3 text-right font-mono tabular-nums font-semibold ${
+                            entry.realized_pnl_usd < 0
+                              ? 'text-rose-400'
+                              : entry.realized_pnl_usd > 0
+                                ? 'text-emerald-400'
+                                : 'text-slate-200'
+                          }`}
+                        >
+                          {formatUsd(entry.realized_pnl_usd)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-sky-400">
+                          {formatUsd(entry.locked_arb_edge_usd)}
+                        </td>
+                        <td className="py-2.5 px-4">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span
+                              className={`inline-block px-2 py-0.5 border rounded font-mono text-[11px] font-semibold ${resBadge.toneClass}`}
+                            >
+                              {resBadge.label}
+                            </span>
+                            {resBadge.isPending ? (
+                              <button
+                                type="button"
+                                disabled={!allowConfirm}
+                                title={
+                                  allowConfirm
+                                    ? 'Manually confirm actual market settlement outcome'
+                                    : 'Operator or Owner role required to confirm market outcomes'
+                                }
+                                onClick={() => openConfirmModal(entry)}
+                                className="px-2.5 py-1 rounded border border-sky-700/80 bg-sky-950/40 hover:bg-sky-900/60 disabled:opacity-45 disabled:cursor-not-allowed text-[11px] font-semibold text-sky-200 transition-colors"
+                              >
+                                Confirm Outcome
+                              </button>
+                            ) : null}
+                          </div>
+                          {!resBadge.isPending ? (
+                            <div className="mt-1 space-y-0.5 text-[11px] text-slate-400 font-mono">
+                              <div>
+                                {entry.resolved_by ? `by ${entry.resolved_by}` : 'confirmed'}
+                                {entry.learning_cycle_id ? ` · ${entry.learning_cycle_id}` : ''}
+                              </div>
+                              {entry.arena_model_id || entry.linked_prediction_id ? (
+                                <div className="text-sky-300/90">
+                                  {[
+                                    entry.arena_model_id ? `model ${entry.arena_model_id}` : null,
+                                    entry.linked_prediction_id
+                                      ? `forecast ${entry.linked_prediction_id}`
+                                      : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' · ')}
+                                </div>
+                              ) : null}
+                              {entry.resolution_notes ? (
+                                <div
+                                  className="text-slate-500 font-sans truncate max-w-[240px]"
+                                  title={entry.resolution_notes}
+                                >
+                                  {entry.resolution_notes}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )
           ) : null}
         </div>
       </section>
+
+      {/* Manual Outcome Confirmation Modal */}
+      {confirmingEntry ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-outcome-title"
+          className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4"
+        >
+          <div className="w-full max-w-lg border border-slate-700 bg-[#111827] rounded-xl overflow-hidden shadow-2xl">
+            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between gap-3">
+              <div>
+                <h3 id="confirm-outcome-title" className="text-sm font-semibold text-slate-100">
+                  Confirm Actual Market Outcome
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Record verified settlement reality into the Learning Core and calibration loop.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeConfirmModal}
+                disabled={resolveBusy}
+                aria-label="Close confirmation dialog"
+                className="px-2 py-1 text-xs text-slate-400 hover:text-slate-100 border border-slate-700 rounded"
+              >
+                Esc
+              </button>
+            </div>
+
+            <form onSubmit={(e) => void handleConfirmResolution(e)} className="p-5 space-y-4 text-xs">
+              <div className="grid grid-cols-2 gap-3 p-3 rounded-lg bg-[#0B111B] border border-slate-800 font-mono">
+                <div>
+                  <div className="text-[11px] text-slate-500">Ledger / Pair</div>
+                  <div className="text-slate-200">{confirmingEntry.ledger_id}</div>
+                  <div className="text-[11px] text-slate-400">{confirmingEntry.pair_id}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[11px] text-slate-500">Simulated Paper P&amp;L / Carry</div>
+                  <div className="text-slate-200 tabular-nums">
+                    {formatUsd(confirmingEntry.realized_pnl_usd)} /{' '}
+                    <span className="text-sky-400">
+                      {formatUsd(confirmingEntry.locked_arb_edge_usd)}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    {summarizeExecutionOutcome(confirmingEntry.outcome_status).label}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-slate-300 font-medium mb-2">
+                  Actual Market Resolution Result
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      ['YES', 'Resolved YES', 'border-emerald-600 bg-emerald-950/50 text-emerald-200'],
+                      ['NO', 'Resolved NO', 'border-rose-600 bg-rose-950/50 text-rose-200'],
+                      ['VOID', 'Market Voided', 'border-amber-600 bg-amber-950/50 text-amber-200'],
+                    ] as Array<['YES' | 'NO' | 'VOID', string, string]>
+                  ).map(([val, desc, activeCls]) => {
+                    const active = selectedResolution === val;
+                    return (
+                      <button
+                        key={val}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => setSelectedResolution(val)}
+                        className={`p-2.5 rounded-lg border text-left transition-colors ${
+                          active
+                            ? activeCls
+                            : 'border-slate-700 bg-[#0B111B] text-slate-300 hover:border-slate-500'
+                        }`}
+                      >
+                        <div className="font-mono font-semibold text-sm">{val}</div>
+                        <div className="text-[11px] opacity-80">{desc}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="resolve-arena-model" className="block text-slate-300 mb-1">
+                    Arena Model ID (Optional)
+                  </label>
+                  <input
+                    id="resolve-arena-model"
+                    type="text"
+                    maxLength={120}
+                    placeholder="e.g. arena:gemini-2.5-pro"
+                    value={arenaModelId}
+                    onChange={(e) => setArenaModelId(e.target.value)}
+                    className="w-full px-3 py-2 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono text-xs"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="resolve-linked-pred" className="block text-slate-300 mb-1">
+                    Link Open Forecast ID (Optional)
+                  </label>
+                  {openPredictions.length > 0 ? (
+                    <select
+                      id="resolve-linked-pred"
+                      value={linkedPredictionId}
+                      onChange={(e) => setLinkedPredictionId(e.target.value)}
+                      className="w-full px-3 py-2 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono text-xs"
+                    >
+                      <option value="">None (blotter learning cycle only)</option>
+                      {openPredictions.map((pred) => (
+                        <option key={pred.prediction_id} value={pred.prediction_id}>
+                          {pred.prediction_id} · {pred.agent_id} ({(pred.predicted_prob * 100).toFixed(0)}%)
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      id="resolve-linked-pred"
+                      type="text"
+                      maxLength={64}
+                      placeholder="e.g. PRED-..."
+                      value={linkedPredictionId}
+                      onChange={(e) => setLinkedPredictionId(e.target.value)}
+                      className="w-full px-3 py-2 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono text-xs"
+                    />
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="resolve-notes" className="block text-slate-300 mb-1">
+                  Settlement Source / Verification Notes (Optional)
+                </label>
+                <textarea
+                  id="resolve-notes"
+                  rows={2}
+                  maxLength={600}
+                  placeholder="Official exchange settlement reference, timestamp, or discrepancy notes..."
+                  value={resolutionNotes}
+                  onChange={(e) => setResolutionNotes(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 text-xs"
+                />
+              </div>
+
+              <label className="flex items-start gap-2.5 p-3 rounded-lg border border-amber-800/60 bg-amber-950/20 text-amber-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={confirmChecked}
+                  onChange={(e) => setConfirmChecked(e.target.checked)}
+                  className="mt-0.5 accent-sky-500"
+                />
+                <span className="leading-relaxed">
+                  I manually confirm that <span className="font-mono font-semibold">{selectedResolution}</span>{' '}
+                  reflects the actual market settlement outcome. This action is final, writes a
+                  closed-loop Learning Core cycle, and does not alter Risk Gate limits.
+                </span>
+              </label>
+
+              {resolveError ? (
+                <div
+                  role="alert"
+                  className="p-3 rounded-lg bg-rose-950/40 border border-rose-800 text-xs text-rose-200"
+                >
+                  {resolveError}
+                </div>
+              ) : null}
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={closeConfirmModal}
+                  disabled={resolveBusy}
+                  className="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!confirmChecked || resolveBusy}
+                  className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-45 disabled:cursor-not-allowed text-white font-semibold"
+                >
+                  {resolveBusy ? 'Recording Outcome...' : `Confirm ${selectedResolution} Outcome`}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

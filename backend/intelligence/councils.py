@@ -21,8 +21,11 @@ Safety & Data Hygiene Invariants:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -49,11 +52,31 @@ COUNCIL_ROLES: tuple[str, ...] = (
     "Risk Sentinel",
 )
 
+MIN_DRIVER_WEIGHT = 0.45
+MAX_DRIVER_WEIGHT = 1.55
+DEFAULT_DRIVER_WEIGHT = 1.0
+DEFAULT_MARKET_CADENCE_SECONDS = 900.0
+
+KNOWN_DRIVER_IDS: tuple[str, ...] = (
+    "SPOT_WHALE_VOLUME",
+    "INSTITUTIONAL_ETF_FLOW",
+    "STOCKS_CRYPTO_CORRELATION",
+    "LEVERAGE_LIQUIDATIONS",
+    "FED_MACRO_GEOPOLITICAL",
+    "MARKET_SENTIMENT",
+)
+
 
 def _clamp_prob(p: float) -> float:
     if not math.isfinite(p):
         return 0.5
     return round(min(0.95, max(0.05, float(p))), 4)
+
+
+def _clamp_driver_weight(w: float) -> float:
+    if not math.isfinite(w):
+        return DEFAULT_DRIVER_WEIGHT
+    return round(min(MAX_DRIVER_WEIGHT, max(MIN_DRIVER_WEIGHT, float(w))), 4)
 
 
 def _horizon_hours(horizon: str) -> float:
@@ -88,10 +111,56 @@ class AICouncilEngine:
         self.learning = learning
         self.memory = memory
         self.adversarial = adversarial
+        raw_cadence = float(os.environ.get("CERTAINTY_MARKET_CADENCE_SECONDS", DEFAULT_MARKET_CADENCE_SECONDS))
+        self._cadence_seconds = max(60.0, min(86400.0, raw_cadence))
+        self._scheduler_lock = asyncio.Lock()
+        self._last_cadence_mono: float | None = None
+        self._cadence_state: dict[str, Any] = {
+            "enabled": True,
+            "cadence_seconds": self._cadence_seconds,
+            "running_cycle": False,
+            "cycles_completed": 0,
+            "total_auto_resolved": 0,
+            "total_auto_convened": 0,
+            "last_run_at": None,
+            "last_status": "IDLE",
+            "last_snapshot_id": None,
+            "last_error": None,
+        }
 
     # ------------------------------------------------------------------
-    # Clean Calibration & Contamination Isolation Queries
+    # Clean Calibration, Adaptive Driver Weights & Contamination Isolation
     # ------------------------------------------------------------------
+    def get_driver_learning_weights(
+        self, *, council_type: CouncilType | None = None
+    ) -> list[dict[str, Any]]:
+        """Return learned causal driver weights built strictly from clean LIVE resolutions."""
+        with self.store._lock:
+            if council_type:
+                rows = self.store._conn.execute(
+                    """
+                    SELECT * FROM driver_learning_weights
+                    WHERE council_type = ?
+                    ORDER BY weight DESC, driver_id ASC
+                    """,
+                    [council_type.upper()],
+                ).fetchall()
+            else:
+                rows = self.store._conn.execute(
+                    """
+                    SELECT * FROM driver_learning_weights
+                    ORDER BY council_type ASC, weight DESC, driver_id ASC
+                    """
+                ).fetchall()
+            cols = [d[0] for d in self.store._conn.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+    def _get_weight_map(self, council_type: CouncilType) -> dict[str, float]:
+        weights = {d: DEFAULT_DRIVER_WEIGHT for d in KNOWN_DRIVER_IDS}
+        for row in self.get_driver_learning_weights(council_type=council_type):
+            weights[str(row["driver_id"])] = _clamp_driver_weight(float(row["weight"]))
+        return weights
+
     def get_clean_calibration_metrics(
         self,
         *,
@@ -99,7 +168,7 @@ class AICouncilEngine:
         include_non_live: bool = False,
         num_buckets: int = 10,
     ) -> dict[str, Any]:
-        """Compute Brier score, log loss, and ECE strictly from clean LIVE verified forecasts by default."""
+        """Compute move & directional Brier, log loss, and ECE strictly from clean LIVE verified forecasts."""
         with self.store._lock:
             clauses = ["1=1"]
             params: list[Any] = []
@@ -111,7 +180,9 @@ class AICouncilEngine:
 
             rows = self.store._conn.execute(
                 f"""
-                SELECT status, predicted_move_prob, actual_outcome, brier_score, log_loss, provenance, verified_clean
+                SELECT status, predicted_move_prob, predicted_up_prob, actual_outcome,
+                       actual_return_pct, brier_score, directional_brier_score,
+                       directional_hit, log_loss
                 FROM movement_forecasts
                 WHERE {' AND '.join(clauses)}
                 """,
@@ -127,23 +198,44 @@ class AICouncilEngine:
 
         open_cnt = sum(1 for r in rows if r[0] == "OPEN")
         voided_cnt = sum(1 for r in rows if r[0] == "VOIDED")
-        resolved = [r for r in rows if r[0] == "RESOLVED" and r[2] in (0, 1)]
+        resolved = [r for r in rows if r[0] == "RESOLVED" and r[3] in (0, 1)]
         n_res = len(resolved)
 
         brier_sum = 0.0
+        dir_brier_sum = 0.0
+        dir_brier_cnt = 0
         logloss_sum = 0.0
-        correct = 0
+        move_correct = 0
+        dir_correct = 0
+        dir_total = 0
         buckets_acc: list[list[tuple[float, int]]] = [[] for _ in range(num_buckets)]
 
-        for _, p_raw, y_raw, b_raw, ll_raw, _, _ in resolved:
-            p = float(p_raw)
+        for _, pm_raw, pu_raw, y_raw, ret_raw, b_raw, db_raw, dhit_raw, ll_raw in resolved:
+            p = float(pm_raw)
+            p_up = float(pu_raw)
             y = int(y_raw)
             brier = float(b_raw) if b_raw is not None else compute_brier_score(p, y)
             ll = float(ll_raw) if ll_raw is not None else compute_log_loss(p, y)
             brier_sum += brier
             logloss_sum += ll
             if (p >= 0.5 and y == 1) or (p < 0.5 and y == 0):
-                correct += 1
+                move_correct += 1
+            if db_raw is not None:
+                dir_brier_sum += float(db_raw)
+                dir_brier_cnt += 1
+            elif ret_raw is not None:
+                dir_brier_sum += compute_brier_score(p_up, 1 if float(ret_raw) > 0 else 0)
+                dir_brier_cnt += 1
+            if dhit_raw is not None:
+                dir_total += 1
+                if bool(dhit_raw):
+                    dir_correct += 1
+            elif ret_raw is not None:
+                dir_total += 1
+                r_val = float(ret_raw)
+                if (p_up >= 0.5 and r_val > 0) or (p_up < 0.5 and r_val < 0):
+                    dir_correct += 1
+
             idx = min(num_buckets - 1, max(0, int(p * num_buckets)))
             buckets_acc[idx].append((p, y))
 
@@ -162,8 +254,16 @@ class AICouncilEngine:
             "voided_count": voided_cnt,
             "excluded_non_live_or_unverified_count": int(excluded_non_live or 0),
             "mean_brier_score": round(brier_sum / n_res, 6) if n_res > 0 else None,
+            "mean_directional_brier_score": (
+                round(dir_brier_sum / dir_brier_cnt, 6) if dir_brier_cnt > 0 else None
+            ),
             "mean_log_loss": round(logloss_sum / n_res, 6) if n_res > 0 else None,
-            "directional_accuracy_pct": round((correct / n_res) * 100.0, 2) if n_res > 0 else None,
+            "move_accuracy_pct": round((move_correct / n_res) * 100.0, 2) if n_res > 0 else None,
+            "directional_accuracy_pct": (
+                round((dir_correct / dir_total) * 100.0, 2)
+                if dir_total > 0
+                else (round((move_correct / n_res) * 100.0, 2) if n_res > 0 else None)
+            ),
             "expected_calibration_error": round(ece, 6) if n_res > 0 else None,
         }
 
@@ -215,8 +315,9 @@ class AICouncilEngine:
         btc_qqq_corr = (corrs.get("BTC_QQQ") or {}).get("correlation")
         btc_spy_corr = (corrs.get("BTC_SPY") or {}).get("correlation")
 
-        # Pull verified historical memories & clean live calibration stats (never TEST/SIMULATED)
+        # Pull verified historical memories, learned LIVE driver weights & clean live calibration stats
         clean_cal = self.get_clean_calibration_metrics(council_type=council_type, include_non_live=False)
+        weight_map = self._get_weight_map(council_type)
         verified_lessons = self.memory.search_relevant(
             f"{council_type.lower()} {target_symbol.lower()} volatility movement",
             statuses=["VERIFIED_LESSON", "APPLIED"],
@@ -330,11 +431,45 @@ class AICouncilEngine:
             elif "SHORT_SQUEEZE" in str(okx_btc.get("crowding_regime") or ""):
                 raw_up_prob = min(0.82, raw_up_prob + 0.10)
 
+        # Apply clean-LIVE adaptive driver weights into Edge Analyst directional & move calibration
+        weighted_tilt = 0.0
+        unweighted_tilt = 0.0
+        active_weight_vals: list[float] = []
+        adapted_notes: list[str] = []
+        driver_signals_snapshot: list[dict[str, Any]] = []
+        for drv in why_drivers:
+            d_id = str(drv.get("driver_id") or "")
+            imp = float(drv.get("impact_score") or 0.0)
+            mag = float(drv.get("magnitude") or 0.0)
+            w = weight_map.get(d_id, DEFAULT_DRIVER_WEIGHT)
+            unweighted_tilt += imp
+            weighted_tilt += imp * w
+            if abs(imp) >= 0.12:
+                active_weight_vals.append(w)
+            if abs(w - DEFAULT_DRIVER_WEIGHT) >= 0.01:
+                adapted_notes.append(f"{d_id}={w:.2f}x")
+            driver_signals_snapshot.append(
+                {
+                    "driver_id": d_id,
+                    "category": str(drv.get("category") or d_id),
+                    "impact_score": round(imp, 4),
+                    "magnitude": round(mag, 4),
+                    "applied_weight": round(w, 4),
+                }
+            )
+
+        learned_up_delta = max(-0.12, min(0.12, (weighted_tilt - unweighted_tilt) * 0.08))
+        raw_up_prob += learned_up_delta
+        if active_weight_vals:
+            avg_w = sum(active_weight_vals) / len(active_weight_vals)
+            raw_move_prob += max(-0.08, min(0.08, (avg_w - 1.0) * 0.16))
+
         edge_stance = (
             "HIGH_EDGE_BREAKOUT"
             if raw_move_prob >= 0.60
             else ("DIRECTIONAL_TILT" if abs(raw_up_prob - 0.50) >= 0.08 else "LOW_EDGE_WAIT")
         )
+        adapt_summary = f" Learned weights active: {', '.join(adapted_notes[:4])}." if adapted_notes else ""
         edge_opinion = {
             "role": "Edge Analyst",
             "agent_id": f"{council_type.lower()}_edge_analyst",
@@ -347,11 +482,13 @@ class AICouncilEngine:
                 "raw_up_prob": round(raw_up_prob, 4),
                 "urgency_score": urgency,
                 "verified_lessons_applied": len(verified_lessons),
+                "learned_up_delta": round(learned_up_delta, 4),
+                "learned_weights_applied": {k: round(v, 4) for k, v in weight_map.items()},
             },
             "rationale": (
                 f"Synthesized {target_symbol} ({horizon}) significant-move edge={raw_move_prob*100:.1f}%, "
                 f"upward bias={raw_up_prob*100:.1f}% across {len(why_drivers)} live driver groups "
-                f"({when_signals.get('movement_regime')})."
+                f"({when_signals.get('movement_regime')}).{adapt_summary}"
             ),
         }
 
@@ -612,6 +749,7 @@ class AICouncilEngine:
                 verified_clean=v_clean,
                 resolve_after=resolve_after,
                 rationale=f"WHY: {top_why[:280]} | WHEN: {regime_verdict}",
+                driver_signals=driver_signals_snapshot,
             )
 
         return delib, forecast_rec
@@ -653,6 +791,15 @@ class AICouncilEngine:
     # ------------------------------------------------------------------
     # Movement Forecast Persistence, Outcome Resolution & Learning Loop
     # ------------------------------------------------------------------
+    def _row_to_forecast(self, cols: list[str], row: tuple[Any, ...]) -> dict[str, Any]:
+        d = dict(zip(cols, row))
+        raw_sigs = d.pop("driver_signals_json", "[]")
+        try:
+            d["driver_signals"] = json.loads(raw_sigs or "[]")
+        except (TypeError, ValueError):
+            d["driver_signals"] = []
+        return d
+
     def record_forecast(
         self,
         *,
@@ -669,6 +816,7 @@ class AICouncilEngine:
         verified_clean: bool,
         resolve_after: str | None = None,
         rationale: str = "",
+        driver_signals: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         fid = f"MFC-{uuid.uuid4().hex[:10].upper()}"
         created_at = utc_now_iso()
@@ -681,8 +829,15 @@ class AICouncilEngine:
         with self.store._lock:
             self.store._conn.execute(
                 """
-                INSERT INTO movement_forecasts VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                INSERT INTO movement_forecasts (
+                    forecast_id, deliberation_id, council_type, symbol, horizon,
+                    move_threshold_pct, predicted_move_prob, predicted_up_prob, confidence,
+                    baseline_price, provenance, verified_clean, status, resolve_after,
+                    actual_price, actual_return_pct, actual_outcome, brier_score, log_loss,
+                    learning_cycle_id, rationale, created_at, resolved_at,
+                    driver_signals_json, directional_brier_score, directional_hit
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 [
@@ -709,6 +864,9 @@ class AICouncilEngine:
                     rationale[:600],
                     created_at,
                     None,
+                    json.dumps(driver_signals or []),
+                    None,
+                    None,
                 ],
             )
             fc = self.get_forecast(fid)
@@ -723,7 +881,7 @@ class AICouncilEngine:
             if not row:
                 return None
             cols = [d[0] for d in self.store._conn.description]
-            return dict(zip(cols, row))
+            return self._row_to_forecast(cols, row)
 
     def list_forecasts(
         self,
@@ -749,7 +907,7 @@ class AICouncilEngine:
         with self.store._lock:
             rows = self.store._conn.execute(sql, params).fetchall()
             cols = [d[0] for d in self.store._conn.description]
-            return [dict(zip(cols, r)) for r in rows]
+            return [self._row_to_forecast(cols, r) for r in rows]
 
     def list_deliberations(
         self,
@@ -780,6 +938,98 @@ class AICouncilEngine:
                 out.append(d)
             return out
 
+    def _update_driver_weights_from_resolution(
+        self,
+        fc: dict[str, Any],
+        *,
+        ret_pct: float,
+        cycle_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """Update bounded adaptive causal driver weights strictly from clean LIVE forecast outcomes."""
+        if fc.get("provenance") != "LIVE" or not fc.get("verified_clean"):
+            return []
+        sigs = fc.get("driver_signals") or []
+        if not sigs:
+            return []
+
+        ctype = str(fc["council_type"]).upper()
+        now_iso = utc_now_iso()
+        updated: list[dict[str, Any]] = []
+
+        with self.store._lock:
+            for sig in sigs:
+                d_id = str(sig.get("driver_id") or "").strip().upper()
+                if not d_id:
+                    continue
+                imp = float(sig.get("impact_score") or 0.0)
+                if abs(imp) < 0.12:
+                    continue
+                w_key = f"{ctype}:{d_id}"
+                existing = self.store._conn.execute(
+                    "SELECT weight, sample_count, hit_count, miss_count, cumulative_skill FROM driver_learning_weights WHERE weight_key = ?",
+                    [w_key],
+                ).fetchone()
+                cur_w = float(existing[0]) if existing else DEFAULT_DRIVER_WEIGHT
+                samples = int(existing[1]) if existing else 0
+                hits = int(existing[2]) if existing else 0
+                misses = int(existing[3]) if existing else 0
+                cum_skill = float(existing[4]) if existing else 0.0
+
+                aligned = (imp > 0 and ret_pct > 0) or (imp < 0 and ret_pct < 0)
+                misaligned = (imp > 0 and ret_pct < 0) or (imp < 0 and ret_pct > 0)
+                strength = min(1.0, abs(imp))
+                if aligned:
+                    delta = 0.05 * strength
+                    hits += 1
+                    skill_step = round(strength * (1.0 if abs(ret_pct) >= float(fc["move_threshold_pct"]) else 0.5), 4)
+                elif misaligned:
+                    delta = -0.06 * strength
+                    misses += 1
+                    skill_step = round(-strength, 4)
+                else:
+                    delta = (DEFAULT_DRIVER_WEIGHT - cur_w) * 0.05
+                    skill_step = 0.0
+
+                new_w = _clamp_driver_weight(cur_w + delta)
+                samples += 1
+                cum_skill = round(cum_skill + skill_step, 4)
+
+                self.store._conn.execute(
+                    """
+                    INSERT OR REPLACE INTO driver_learning_weights (
+                        weight_key, council_type, driver_id, weight, sample_count,
+                        hit_count, miss_count, cumulative_skill, last_forecast_id,
+                        last_learning_cycle_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        w_key,
+                        ctype,
+                        d_id,
+                        new_w,
+                        samples,
+                        hits,
+                        misses,
+                        cum_skill,
+                        fc["forecast_id"],
+                        cycle_id,
+                        now_iso,
+                    ],
+                )
+                updated.append(
+                    {
+                        "weight_key": w_key,
+                        "council_type": ctype,
+                        "driver_id": d_id,
+                        "weight": new_w,
+                        "sample_count": samples,
+                        "hit_count": hits,
+                        "miss_count": misses,
+                        "cumulative_skill": cum_skill,
+                    }
+                )
+        return updated
+
     def resolve_forecast(
         self,
         forecast_id: str,
@@ -788,7 +1038,7 @@ class AICouncilEngine:
         void_reason: str | None = None,
         reviewer_id: str = "calibration_auditor",
     ) -> dict[str, Any]:
-        """Resolve an OPEN movement forecast against observed price, score Brier/log-loss, and update LearningEngine."""
+        """Resolve an OPEN forecast, score move & directional Brier, and adapt clean-LIVE driver weights."""
         with self.store._lock:
             fc = self.get_forecast(forecast_id)
             if not fc:
@@ -817,6 +1067,12 @@ class AICouncilEngine:
             sig_move = 1 if abs(ret_pct) >= float(fc["move_threshold_pct"]) else 0
 
             brier = compute_brier_score(fc["predicted_move_prob"], sig_move)
+            actual_up = 1 if ret_pct > 0 else 0
+            dir_brier = compute_brier_score(fc["predicted_up_prob"], actual_up)
+            dir_hit = bool(
+                (float(fc["predicted_up_prob"]) >= 0.5 and ret_pct > 0)
+                or (float(fc["predicted_up_prob"]) < 0.5 and ret_pct < 0)
+            )
             ll = compute_log_loss(fc["predicted_move_prob"], sig_move)
 
             # Feed errors / significant calibration misses into LearningEngine ONLY for clean LIVE forecasts
@@ -825,7 +1081,8 @@ class AICouncilEngine:
             prob_wrong = (fc["predicted_move_prob"] >= 0.5 and sig_move == 0) or (
                 fc["predicted_move_prob"] < 0.5 and sig_move == 1
             )
-            if fc["provenance"] == "LIVE" and fc["verified_clean"] and (brier > 0.15 or prob_wrong):
+            is_clean_live = bool(fc["provenance"] == "LIVE" and fc["verified_clean"])
+            if is_clean_live and (brier > 0.15 or prob_wrong or dir_brier > 0.25):
                 subj = f"{fc['council_type'].lower()}_{fc['symbol'].lower()}_move_{fc['horizon'].lower()}"
                 cyc = self.learning.record_observation(
                     source_type="MOVEMENT_FORECAST",
@@ -833,11 +1090,12 @@ class AICouncilEngine:
                     agent_id=f"{fc['council_type'].lower()}_edge_analyst",
                     subject_key=subj,
                     hypothesis=(
-                        f"{fc['council_type']} council predicted {fc['predicted_move_prob']*100:.1f}% prob of "
-                        f"|return|>={fc['move_threshold_pct']}% on {fc['symbol']} ({fc['horizon']})"
+                        f"{fc['council_type']} council predicted {fc['predicted_move_prob']*100:.1f}% move / "
+                        f"{fc['predicted_up_prob']*100:.1f}% up on {fc['symbol']} ({fc['horizon']})"
                     ),
                     expected_outcome={
                         "significant_move_prob": fc["predicted_move_prob"],
+                        "predicted_up_prob": fc["predicted_up_prob"],
                         "expected_significant_move": fc["predicted_move_prob"] >= 0.5,
                     },
                     evidence=[
@@ -848,6 +1106,7 @@ class AICouncilEngine:
                             "actual_price": act_px,
                             "actual_return_pct": ret_pct,
                             "brier_score": brier,
+                            "directional_brier_score": dir_brier,
                         }
                     ],
                 )
@@ -855,13 +1114,13 @@ class AICouncilEngine:
                     cyc["cycle_id"],
                     evaluation_notes=(
                         f"Observed {fc['symbol']} return {ret_pct:+.2f}% vs threshold {fc['move_threshold_pct']}%; "
-                        f"Brier={brier:.4f}."
+                        f"Move Brier={brier:.4f}, Dir Brier={dir_brier:.4f}."
                     ),
                 )
                 self.learning.record_decision(
                     cyc["cycle_id"],
                     decision_summary=(
-                        f"Adjust {fc['council_type']} {fc['horizon']} compression/catalyst weighting via independent calibration review."
+                        f"Adjust {fc['council_type']} {fc['horizon']} causal driver weights via independent calibration review."
                     ),
                 )
                 self.learning.record_outcome(
@@ -870,8 +1129,9 @@ class AICouncilEngine:
                         "actual_significant_move": bool(sig_move),
                         "actual_return_pct": ret_pct,
                         "brier_score": brier,
+                        "directional_brier_score": dir_brier,
                     },
-                    outcome_matched=(not prob_wrong and brier <= 0.15),
+                    outcome_matched=(not prob_wrong and brier <= 0.15 and dir_brier <= 0.25),
                 )
                 # Independent review by Calibration Auditor (anti-self-promotion preserved)
                 eff_rev = (
@@ -879,21 +1139,57 @@ class AICouncilEngine:
                     if reviewer_id.strip().lower() != f"{fc['council_type'].lower()}_edge_analyst"
                     else "calibration_auditor"
                 )
-                self.learning.review_and_extract_lesson(
+                approve = brier > 0.20 or dir_brier > 0.30
+                reviewed = self.learning.review_and_extract_lesson(
                     cyc["cycle_id"],
                     reviewer_id=eff_rev,
-                    review_notes=f"Calibration Auditor reviewed resolved forecast {forecast_id} (Brier={brier:.4f}).",
-                    approve_lesson=(brier > 0.20),
+                    review_notes=(
+                        f"Calibration Auditor reviewed {forecast_id} "
+                        f"(Move Brier={brier:.4f}, Dir Brier={dir_brier:.4f})."
+                    ),
+                    approve_lesson=approve,
                     lesson_tier="EPISODIC",
                     lesson_category="MOVEMENT_CALIBRATION_LESSON",
-                    lesson_title=f"{fc['council_type']} {fc['symbol']} {fc['horizon']} forecast adjustment",
+                    lesson_title=f"{fc['council_type']} {fc['symbol']} {fc['horizon']} driver calibration",
                     lesson_summary=(
-                        f"Predicted {fc['predicted_move_prob']*100:.1f}% move prob, actual return {ret_pct:+.2f}% "
-                        f"(Brier={brier:.4f}). Calibrate catalyst/compression weight accordingly."
+                        f"Predicted {fc['predicted_move_prob']*100:.1f}% move / {fc['predicted_up_prob']*100:.1f}% up, "
+                        f"actual return {ret_pct:+.2f}% (Move Brier={brier:.4f}, Dir Brier={dir_brier:.4f})."
                     ),
-                    confidence=0.78,
+                    confidence=0.80,
                 )
                 cycle_id = cyc["cycle_id"]
+
+                # Apply adaptive weight update cleanly and run fail-closed regression verification
+                updated_weights = self._update_driver_weights_from_resolution(
+                    fc, ret_pct=ret_pct, cycle_id=cycle_id
+                )
+                if reviewed.get("stage") == "VERIFIED_LESSON":
+                    bounds_ok = all(
+                        MIN_DRIVER_WEIGHT <= float(w["weight"]) <= MAX_DRIVER_WEIGHT
+                        for w in updated_weights
+                    )
+                    reg_case = self.learning.generate_regression_case(
+                        source_memory_id=reviewed.get("promoted_memory_id"),
+                        source_cycle_id=cycle_id,
+                        source_ref_id=forecast_id,
+                        category="CALIBRATION_WEIGHT_GUARD",
+                        title=f"Adaptive weight guard: {fc['council_type']} {fc['symbol']}",
+                        description="Verify adaptive causal driver weights stay bounded and live_trading_enabled remains False.",
+                        input_fixture={"forecast_id": forecast_id, "council_type": fc["council_type"]},
+                        expected_invariant={"weights_bounded": True, "live_trading_enabled": False},
+                    )
+                    reg_res = self.learning.run_regression_case(
+                        reg_case["case_id"],
+                        observed_output={"weights_bounded": bounds_ok, "live_trading_enabled": False},
+                    )
+                    if reg_res.get("status") == "PASSING":
+                        self.learning.apply_verified_lesson(
+                            cycle_id,
+                            target_workflow=f"{fc['council_type'].lower()}_driver_weights",
+                        )
+            elif is_clean_live:
+                # Reinforce accurate clean LIVE predictions cleanly even when no error cycle was needed
+                self._update_driver_weights_from_resolution(fc, ret_pct=ret_pct, cycle_id=None)
 
             self.store._conn.execute(
                 """
@@ -905,17 +1201,29 @@ class AICouncilEngine:
                     brier_score = ?,
                     log_loss = ?,
                     learning_cycle_id = ?,
-                    resolved_at = ?
+                    resolved_at = ?,
+                    directional_brier_score = ?,
+                    directional_hit = ?
                 WHERE forecast_id = ?
                 """,
-                [act_px, ret_pct, sig_move, brier, ll, cycle_id, now_iso, forecast_id],
+                [
+                    act_px,
+                    ret_pct,
+                    sig_move,
+                    brier,
+                    ll,
+                    cycle_id,
+                    now_iso,
+                    dir_brier,
+                    dir_hit,
+                    forecast_id,
+                ],
             )
             updated = self.get_forecast(forecast_id)
             assert updated is not None
             return updated
 
-    async def resolve_due_forecasts(self, *, force_all_live: bool = False) -> dict[str, Any]:
-        """Resolve due OPEN LIVE forecasts against freshly fetched public prices (never TEST/SIMULATED)."""
+    def _resolve_due_against_snapshot(self, snap: dict[str, Any], *, force_all_live: bool = False) -> list[dict[str, Any]]:
         open_live = self.list_forecasts(status="OPEN", clean_live_only=True, limit=100)
         now_dt = datetime.now(timezone.utc)
         due: list[dict[str, Any]] = []
@@ -930,10 +1238,6 @@ class AICouncilEngine:
             except (TypeError, ValueError):
                 continue
 
-        if not due:
-            return {"resolved_count": 0, "skipped_not_due": len(open_live), "items": []}
-
-        snap = await self.market_drivers.ingest_live_snapshot()
         assets = snap.get("assets") or {}
         resolved_items: list[dict[str, Any]] = []
         for fc in due:
@@ -941,11 +1245,113 @@ class AICouncilEngine:
             px = (assets.get(sym) or {}).get("price_usd")
             if px is not None:
                 resolved_items.append(self.resolve_forecast(fc["forecast_id"], actual_price=float(px)))
+        return resolved_items
+
+    async def resolve_due_forecasts(self, *, force_all_live: bool = False) -> dict[str, Any]:
+        """Resolve due OPEN LIVE forecasts against freshly fetched public prices (never TEST/SIMULATED)."""
+        open_live = self.list_forecasts(status="OPEN", clean_live_only=True, limit=100)
+        now_dt = datetime.now(timezone.utc)
+        has_due = force_all_live or any(
+            (datetime.fromisoformat(str(fc["resolve_after"]).replace("Z", "+00:00")) <= now_dt)
+            for fc in open_live
+            if fc.get("resolve_after")
+        )
+        if not has_due:
+            return {"resolved_count": 0, "skipped_not_due": len(open_live), "items": []}
+
+        snap = await self.market_drivers.ingest_live_snapshot()
+        resolved_items = self._resolve_due_against_snapshot(snap, force_all_live=force_all_live)
         return {
             "resolved_count": len(resolved_items),
             "snapshot_id": snap["snapshot_id"],
             "items": resolved_items,
         }
+
+    async def run_autonomous_learning_cycle(
+        self,
+        *,
+        horizon: str = "24H",
+        force_convene: bool = False,
+    ) -> dict[str, Any]:
+        """Execute a full bounded cycle: ingest LIVE feeds -> resolve due forecasts -> replenish open councils."""
+        if self.store.is_kill_switch_active():
+            self._cadence_state.update(
+                {"last_run_at": utc_now_iso(), "last_status": "HALTED_BY_KILL_SWITCH", "running_cycle": False}
+            )
+            return {"skipped": True, "reason": "KILL_SWITCH_ACTIVE", "state": dict(self._cadence_state)}
+
+        async with self._scheduler_lock:
+            self._cadence_state["running_cycle"] = True
+            self._last_cadence_mono = time.monotonic()
+            try:
+                snap = await self.market_drivers.ingest_live_snapshot()
+                resolved_items = self._resolve_due_against_snapshot(snap, force_all_live=False)
+
+                convened_councils: list[str] = []
+                created_forecasts: list[dict[str, Any]] = []
+                if snap.get("provenance") == "LIVE" and snap.get("verified_clean"):
+                    open_live = self.list_forecasts(status="OPEN", clean_live_only=True, limit=50)
+                    open_types = {str(f["council_type"]).upper() for f in open_live}
+                    missing = (
+                        ["CRYPTO", "STOCKS"]
+                        if force_convene
+                        else [ct for ct in ("CRYPTO", "STOCKS") if ct not in open_types]
+                    )
+                    if missing:
+                        res = self.convene_councils(
+                            snapshot=snap,
+                            councils=missing,  # type: ignore[arg-type]
+                            horizon=horizon.upper(),
+                            create_forecasts=True,
+                        )
+                        convened_councils = list(res["deliberations"].keys())
+                        created_forecasts = list(res["created_forecasts"])
+
+                self._cadence_state.update(
+                    {
+                        "running_cycle": False,
+                        "cycles_completed": int(self._cadence_state["cycles_completed"]) + 1,
+                        "total_auto_resolved": int(self._cadence_state["total_auto_resolved"]) + len(resolved_items),
+                        "total_auto_convened": int(self._cadence_state["total_auto_convened"]) + len(convened_councils),
+                        "last_run_at": utc_now_iso(),
+                        "last_status": "COMPLETED" if snap.get("provenance") == "LIVE" else "DEGRADED_FEEDS",
+                        "last_snapshot_id": snap.get("snapshot_id"),
+                        "last_error": None,
+                    }
+                )
+                return {
+                    "skipped": False,
+                    "snapshot_id": snap.get("snapshot_id"),
+                    "provenance": snap.get("provenance"),
+                    "resolved_count": len(resolved_items),
+                    "convened_councils": convened_councils,
+                    "created_forecasts": created_forecasts,
+                    "state": dict(self._cadence_state),
+                }
+            except Exception as exc:
+                err_txt = str(exc)[:220]
+                self._cadence_state.update(
+                    {
+                        "running_cycle": False,
+                        "last_run_at": utc_now_iso(),
+                        "last_status": "ERROR",
+                        "last_error": err_txt,
+                    }
+                )
+                return {"skipped": False, "error": err_txt, "state": dict(self._cadence_state)}
+
+    async def tick_autonomous_cadence(self) -> None:
+        """Supervisor loop tick hook: runs periodic $0 LIVE market ingestion & due resolution cleanly."""
+        if self.store.is_kill_switch_active() or self._scheduler_lock.locked():
+            return
+        now_m = time.monotonic()
+        if self._last_cadence_mono is None:
+            # Allow brief startup grace (~20s) before first periodic cycle
+            self._last_cadence_mono = now_m - max(0.0, self._cadence_seconds - 20.0)
+            return
+        if (now_m - self._last_cadence_mono) < self._cadence_seconds:
+            return
+        await self.run_autonomous_learning_cycle(horizon="24H", force_convene=False)
 
     def get_overview(self, *, horizon: str = "24H") -> dict[str, Any]:
         latest_clean = self.market_drivers.get_latest_snapshot(clean_live_only=True)
@@ -960,6 +1366,8 @@ class AICouncilEngine:
             "stocks_council": latest_stocks[0] if latest_stocks else None,
             "recent_deliberations": self.list_deliberations(limit=12),
             "forecasts": self.list_forecasts(limit=40),
+            "driver_weights": self.get_driver_learning_weights(),
+            "scheduler_state": dict(self._cadence_state),
             "calibration_live_only": self.get_clean_calibration_metrics(include_non_live=False),
             "crypto_calibration": self.get_clean_calibration_metrics(council_type="CRYPTO", include_non_live=False),
             "stocks_calibration": self.get_clean_calibration_metrics(council_type="STOCKS", include_non_live=False),

@@ -11,6 +11,7 @@ import { MemoryArchitectureView } from './components/MemoryArchitectureView';
 import { RiskGateAuditView } from './components/RiskGateAuditView';
 import { ScannerView } from './components/ScannerView';
 import { SidebarNav, type WorkspaceTab } from './components/SidebarNav';
+import { SolanaDeskView } from './components/SolanaDeskView';
 import { TopBar } from './components/TopBar';
 import type {
   AuthStatusResponse,
@@ -23,7 +24,9 @@ import type {
   KalshiMarketSummary,
   MarketBookSnapshotResponse,
   MarketIntelligenceOverview,
+  ModelProviderRegistry,
   PaperBlotterResponse,
+  SolanaOverviewResponse,
 } from './types/certainty';
 import { canAccessWorkspaceTab, type RiskDryRunFormState } from './utils/formatters';
 
@@ -66,8 +69,11 @@ export default function App() {
   const [intelligenceData, setIntelligenceData] =
     useState<IntelligenceCommandCenterPayload | null>(null);
   const [intelligenceLoading, setIntelligenceLoading] = useState(false);
+  const [providerRegistry, setProviderRegistry] = useState<ModelProviderRegistry | null>(null);
   const [marketIntelData, setMarketIntelData] = useState<MarketIntelligenceOverview | null>(null);
   const [marketIntelLoading, setMarketIntelLoading] = useState(false);
+  const [solanaData, setSolanaData] = useState<SolanaOverviewResponse | null>(null);
+  const [solanaLoading, setSolanaLoading] = useState(false);
 
   const resetWorkspaceState = useCallback(() => {
     setDashboard(null);
@@ -79,7 +85,9 @@ export default function App() {
     setCrossOpps([]);
     setPaperBlotter(null);
     setIntelligenceData(null);
+    setProviderRegistry(null);
     setMarketIntelData(null);
+    setSolanaData(null);
     setActiveTab('command');
   }, []);
 
@@ -182,12 +190,28 @@ export default function App() {
   const loadIntelligenceCenter = useCallback(async () => {
     setIntelligenceLoading(true);
     try {
-      const res = await certaintyApi.getIntelligenceCommandCenter();
+      const [res, provs] = await Promise.all([
+        certaintyApi.getIntelligenceCommandCenter(),
+        certaintyApi.getModelProviders(),
+      ]);
       setIntelligenceData(res);
+      setProviderRegistry(provs);
     } catch {
       // Surfaced via command-center loader state
     } finally {
       setIntelligenceLoading(false);
+    }
+  }, []);
+
+  const loadSolanaDesk = useCallback(async () => {
+    setSolanaLoading(true);
+    try {
+      const res = await certaintyApi.getSolanaOverview(60);
+      setSolanaData(res);
+    } catch {
+      // Surfaced via SolanaDeskView loader state
+    } finally {
+      setSolanaLoading(false);
     }
   }, []);
 
@@ -244,6 +268,7 @@ export default function App() {
     void loadKalshiMarkets();
     void loadIntelligenceCenter();
     void loadMarketIntel();
+    void loadSolanaDesk();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser?.user_id]);
 
@@ -425,6 +450,7 @@ export default function App() {
             void loadAll(true);
             void loadIntelligenceCenter();
             void loadMarketIntel();
+            void loadSolanaDesk();
           }}
           onOpenChangePassword={() => {
             setPasswordError(null);
@@ -529,6 +555,7 @@ export default function App() {
                   bookError={bookError}
                   scanning={scanning}
                   canRunScans={authUser.permissions.can_run_scans}
+                  isOwner={authUser.role === 'OWNER'}
                   onSelectMarket={(id) => void loadSelectedBook(id)}
                   onRunScan={() => void handleRunScan()}
                   onNavigateTab={(tab) => setActiveTab(tab)}
@@ -576,10 +603,29 @@ export default function App() {
                   pairs={crossPairs}
                   crossOpportunities={crossOpps}
                   blotter={paperBlotter}
+                  openPredictions={
+                    intelligenceData?.predictions.filter((p) => p.status === 'OPEN') ?? []
+                  }
                   permissions={authUser.permissions}
                   onRefreshKalshi={loadKalshiMarkets}
                   onRefreshCrossVenue={async () => {
-                    await Promise.all([loadCrossVenueAndBlotter(), loadAll(false)]);
+                    await Promise.all([
+                      loadCrossVenueAndBlotter(),
+                      loadIntelligenceCenter(),
+                      loadAll(false),
+                    ]);
+                  }}
+                />
+              ) : null}
+
+              {activeTab === 'solana' ? (
+                <SolanaDeskView
+                  data={solanaData}
+                  loading={solanaLoading}
+                  providers={providerRegistry?.providers ?? intelligenceData?.model_routing.providers}
+                  permissions={authUser.permissions}
+                  onRefresh={async () => {
+                    await Promise.all([loadSolanaDesk(), loadIntelligenceCenter(), loadAll(false)]);
                   }}
                 />
               ) : null}
@@ -587,6 +633,7 @@ export default function App() {
               {activeTab === 'intelligence' ? (
                 <IntelligenceCenterView
                   data={intelligenceData}
+                  providerRegistry={providerRegistry}
                   loading={intelligenceLoading}
                   permissions={authUser.permissions}
                   onRefresh={async () => {

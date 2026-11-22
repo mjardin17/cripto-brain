@@ -2,22 +2,29 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canAccessWorkspaceTab,
+  canConfirmBlotterResolution,
   computeBudgetUtilizationPct,
   describeProvenance,
   describeUserRole,
   filterOpportunities,
+  formatDriverWeightMultiplier,
   formatDurationSeconds,
   formatPct,
   formatPrice,
   formatProbPct,
   formatScoreMetric,
+  formatSolanaTokenPrice,
   formatUsd,
   getRiskDryRunPreset,
   hasRoleAtLeast,
   parseApiJsonResponse,
   summarizeAgentTaskStatus,
   summarizeAuditOutcome,
+  summarizeBlotterResolution,
+  summarizeDriverLearningWeight,
   summarizeExecutionOutcome,
+  summarizeProviderStatus,
+  summarizeSolanaCandidateStatus,
   summarizeValidationStatus,
 } from './formatters';
 import type { ArbitrageOpportunity } from '../types/certainty';
@@ -164,4 +171,58 @@ test('parseApiJsonResponse handles HTML warmup/error responses cleanly without c
   assert.equal(validJson.ok, true);
   assert.deepEqual(validJson.data, { authenticated: false, needs_owner_bootstrap: true });
 });
+
+test('adaptive causal driver weight formatters classify upweighted, dampened, and baseline cleanly', () => {
+  assert.equal(formatDriverWeightMultiplier(1.1234), '1.12x');
+  assert.equal(formatDriverWeightMultiplier(null), '1.00x');
+
+  const up = summarizeDriverLearningWeight(1.12, 4, 2.5);
+  assert.equal(up.badge, 'UPWEIGHTED');
+  assert.equal(up.label, 'UPWEIGHTED (1.12x)');
+  assert.match(up.toneClass, /emerald/);
+
+  const down = summarizeDriverLearningWeight(0.84, 3, -1.8);
+  assert.equal(down.badge, 'DAMPENED');
+  assert.equal(down.label, 'DAMPENED (0.84x)');
+  assert.match(down.toneClass, /rose/);
+
+  const base = summarizeDriverLearningWeight(1.0, 0, 0);
+  assert.equal(base.badge, 'BASELINE');
+  assert.equal(base.label, 'BASELINE (1.00x)');
+});
+
+test('Solana desk formatters, provider status summaries, and solana tab RBAC work cleanly', () => {
+  assert.equal(canAccessWorkspaceTab('READ_ONLY', 'solana'), true);
+  assert.equal(canAccessWorkspaceTab('ANALYST', 'solana'), true);
+  assert.equal(canAccessWorkspaceTab(null, 'solana'), false);
+
+  assert.equal(formatSolanaTokenPrice(0.00001234), '$0.00001234');
+  assert.equal(formatSolanaTokenPrice(0.004512), '$0.004512');
+  assert.equal(formatSolanaTokenPrice(1.2345), '$1.23');
+  assert.equal(formatSolanaTokenPrice(null), '—');
+
+  assert.equal(summarizeSolanaCandidateStatus('PAPER_QUOTE_REQUIRED').toneClass, 'text-emerald-400');
+  assert.equal(summarizeSolanaCandidateStatus('REJECTED').toneClass, 'text-rose-400');
+  assert.equal(summarizeProviderStatus('AVAILABLE').toneClass, 'text-emerald-400');
+  assert.equal(summarizeProviderStatus('RATE_LIMITED').toneClass, 'text-amber-400');
+  assert.equal(summarizeProviderStatus('UNAVAILABLE').toneClass, 'text-slate-400');
+});
+
+test('paper blotter resolution formatters and confirmation guard handle YES/NO/VOID/PENDING cleanly', () => {
+  assert.equal(summarizeBlotterResolution(undefined).label, 'PENDING');
+  assert.equal(summarizeBlotterResolution(null).isPending, true);
+  assert.equal(summarizeBlotterResolution('YES').isPending, false);
+  assert.match(summarizeBlotterResolution('YES').toneClass, /emerald/);
+  assert.match(summarizeBlotterResolution('NO').toneClass, /rose/);
+  assert.match(summarizeBlotterResolution('VOID').toneClass, /amber/);
+
+  assert.equal(canConfirmBlotterResolution('PENDING', true), true);
+  assert.equal(canConfirmBlotterResolution(undefined, true), true);
+  assert.equal(canConfirmBlotterResolution('PENDING', false), false);
+  assert.equal(canConfirmBlotterResolution('YES', true), false);
+  assert.equal(canConfirmBlotterResolution('NO', true), false);
+  assert.equal(canConfirmBlotterResolution('VOID', true), false);
+});
+
+
 

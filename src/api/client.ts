@@ -11,6 +11,7 @@ import type {
   CrossVenuePairRecord,
   CrossVenuePairRegisterResponse,
   CrossVenueScanResponse,
+  DriverLearningWeightRecord,
   PairDiscoveryResponse,
   PairReviewResponse,
   CouncilDefinition,
@@ -27,12 +28,16 @@ import type {
   KalshiBookSnapshotResponse,
   KalshiMarketsListResponse,
   KillSwitchState,
+  LearningRegressionMonitorResponse,
   MarketBookSnapshotResponse,
   MarketDriverSnapshot,
   MarketIntelligenceOverview,
+  MarketSchedulerState,
+  ModelProviderRegistry,
   ModelRoutingEvent,
   MovementForecastRecord,
   OperationalHealthReport,
+  PaperBlotterResolveResponse,
   PaperBlotterResponse,
   PaperExecuteResponse,
   PaperExecutionScenario,
@@ -47,6 +52,11 @@ import type {
   SessionRecord,
   SoakMode,
   SoakRunRecord,
+  SolanaDiscoverResponse,
+  SolanaEvaluateResponse,
+  SolanaOverviewResponse,
+  SolanaPaperMarkResponse,
+  SolanaPaperOpenResponse,
   SystemEventRecord,
   UserRole,
 } from '../types/certainty';
@@ -368,6 +378,23 @@ export const certaintyApi = {
 
   getPaperBlotter: (limit = 100) =>
     apiFetch<PaperBlotterResponse>(`/api/paper/blotter?limit=${limit}`),
+
+  resolvePaperBlotterEntry: (
+    ledgerId: string,
+    payload: {
+      resolution_result: 'YES' | 'NO' | 'VOID';
+      notes?: string;
+      linked_prediction_id?: string | null;
+      arena_model_id?: string | null;
+    }
+  ) =>
+    apiFetch<PaperBlotterResolveResponse>(
+      `/api/paper/blotter/${encodeURIComponent(ledgerId)}/resolve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
 
   // Stage 3D: Intelligence & Agent Command Center
   getIntelligenceCommandCenter: () =>
@@ -765,5 +792,108 @@ export const certaintyApi = {
         body: JSON.stringify({ force_all_live: forceAllLive }),
       }
     ),
+
+  getDriverLearningWeights: (councilType?: 'CRYPTO' | 'STOCKS') =>
+    apiFetch<{ count: number; items: DriverLearningWeightRecord[] }>(
+      councilType
+        ? `/api/market-intelligence/weights?council_type=${councilType}`
+        : '/api/market-intelligence/weights'
+    ),
+
+  runMarketLearningCycle: (payload?: {
+    horizon?: '4H' | '12H' | '24H' | '48H';
+    force_convene?: boolean;
+  }) =>
+    apiFetch<{
+      skipped: boolean;
+      reason?: string;
+      snapshot_id?: string;
+      provenance?: string;
+      resolved_count?: number;
+      convened_councils?: string[];
+      created_forecasts?: MovementForecastRecord[];
+      state: MarketSchedulerState;
+      error?: string;
+    }>('/api/market-intelligence/learning-cycle/run', {
+      method: 'POST',
+      body: JSON.stringify(payload ?? { horizon: '24H', force_convene: false }),
+    }),
+
+  // Multi-Provider Model Ecosystem & Learning Core Governance
+  getModelProviders: () => apiFetch<ModelProviderRegistry>('/api/intelligence/providers'),
+
+  probeModelProviders: () =>
+    apiFetch<ModelProviderRegistry>('/api/intelligence/providers/probe', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  updateProviderFallbackOrder: (fallbackOrder: string[]) =>
+    apiFetch<ModelProviderRegistry>('/api/intelligence/providers/fallback-order', {
+      method: 'POST',
+      body: JSON.stringify({ fallback_order: fallbackOrder }),
+    }),
+
+  clearProviderCooldown: (providerId: string) =>
+    apiFetch<ModelProviderRegistry>(
+      `/api/intelligence/providers/${encodeURIComponent(providerId)}/clear-cooldown`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    ),
+
+  monitorLearningRegressions: () =>
+    apiFetch<LearningRegressionMonitorResponse>('/api/intelligence/learning/monitor-regressions', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  rollbackLearningCycle: (cycleId: string, reason = 'Rolled back via UI') =>
+    apiFetch<Record<string, unknown>>(
+      `/api/intelligence/learning/cycles/${encodeURIComponent(cycleId)}/rollback`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }
+    ),
+
+  // Solana Memecoin Research & Simulated Paper Desk
+  getSolanaOverview: (limit = 50) =>
+    apiFetch<SolanaOverviewResponse>(`/api/solana/overview?limit=${limit}`),
+
+  discoverSolanaPools: (payload?: { query?: string; limit?: number }) =>
+    apiFetch<SolanaDiscoverResponse>('/api/solana/discover', {
+      method: 'POST',
+      body: JSON.stringify(payload ?? { query: 'SOL', limit: 12 }),
+    }),
+
+  evaluateSolanaMint: (payload: {
+    mint: string;
+    symbol?: string | null;
+    analyst_mode?: 'ai' | 'deterministic';
+    preferred_provider?: string | null;
+  }) =>
+    apiFetch<SolanaEvaluateResponse>('/api/solana/evaluate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  openSolanaPaperPosition: (payload: {
+    mint: string;
+    entry_price?: number | null;
+    notional_usd?: number | null;
+  }) =>
+    apiFetch<SolanaPaperOpenResponse>('/api/solana/paper/open', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  markSolanaPaperPositions: (prices?: Record<string, number>) =>
+    apiFetch<SolanaPaperMarkResponse>('/api/solana/paper/mark', {
+      method: 'POST',
+      body: JSON.stringify({ prices: prices ?? null }),
+    }),
 };
+
 

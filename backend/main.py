@@ -7,7 +7,7 @@ import os
 import re
 import secrets
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -79,6 +79,7 @@ from backend.security.dependencies import (
     optional_authenticated_user,
     set_auth_cookies,
 )
+from backend.solana_desk.engine import PersistentSolanaDesk
 from backend.storage.duckdb_store import DuckDBStore, utc_now_iso
 from backend.venues.kalshi import KalshiReadOnlyClient
 from backend.venues.polymarket import PolymarketReadOnlyClient
@@ -225,6 +226,13 @@ class CrossVenueDiscoverRequest(BaseModel):
     poly_pages: int = Field(default=5, ge=1, le=10)
     kalshi_max_pages: int = Field(default=40, ge=1, le=60)
     min_similarity: float = Field(default=0.3, ge=0.1, le=1.0)
+
+
+class PaperBlotterResolveRequest(BaseModel):
+    resolution_result: Literal["YES", "NO", "VOID"]
+    notes: str = Field(default="", max_length=600)
+    linked_prediction_id: str | None = Field(default=None, max_length=64)
+    arena_model_id: str | None = Field(default=None, max_length=120)
 
 
 class CrossVenuePairRejectRequest(BaseModel):
@@ -421,6 +429,41 @@ class ForecastResolveDueRequest(BaseModel):
     force_all_live: bool = False
 
 
+class MarketLearningCycleRequest(BaseModel):
+    horizon: str = Field(default="24H", pattern="^(4H|12H|24H|48H)$")
+    force_convene: bool = False
+
+
+class SolanaDiscoverRequest(BaseModel):
+    query: str = Field(default="solana", min_length=1, max_length=64)
+    limit: int = Field(default=12, ge=1, le=30)
+
+
+class SolanaEvaluateRequest(BaseModel):
+    mint: str = Field(min_length=12, max_length=64)
+    symbol: str | None = Field(default=None, max_length=32)
+    analyst_mode: str = Field(default="ai", pattern="^(ai|deterministic)$")
+    preferred_provider: str | None = Field(default=None, max_length=32)
+
+
+class SolanaPaperOpenRequest(BaseModel):
+    mint: str = Field(min_length=12, max_length=64)
+    entry_price: float | None = Field(default=None, gt=0.0)
+    notional_usd: float | None = Field(default=None, gt=0.0)
+
+
+class SolanaPaperMarkRequest(BaseModel):
+    prices: dict[str, float] | None = None
+
+
+class FallbackOrderUpdateRequest(BaseModel):
+    fallback_order: list[str] = Field(min_length=1, max_length=10)
+
+
+class LearningRollbackRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=240)
+
+
 def create_app(
     db_path: str | None = None,
     *,
@@ -448,6 +491,12 @@ def create_app(
     prob_engine = ProbabilityIntelligenceEngine(store=store, learning=learning_engine)
     config_manager = ConfigGovernanceManager(store=store, learning=learning_engine)
     model_router = CostAwareModelRouter(store=store)
+    solana_desk = PersistentSolanaDesk(
+        store=store,
+        model_router=model_router,
+        learning_engine=learning_engine,
+        risk_gate=risk_gate,
+    )
     supervisor = SupervisorOrchestrator(
         store=store,
         risk_gate=risk_gate,
@@ -456,6 +505,7 @@ def create_app(
         scanner=scanner,
         cross_scanner=cross_scanner,
         model_router=model_router,
+        solana_desk=solana_desk,
     )
     health_monitor = OperationalHealthMonitor(
         store=store, supervisor=supervisor, model_router=model_router
@@ -483,6 +533,8 @@ def create_app(
         memory=memory_manager,
         adversarial=adversarial_engine,
     )
+    if enable_background_loop and os.environ.get("CERTAINTY_DISABLE_SUPERVISOR_LOOP") != "1":
+        supervisor.register_tick_hook(ai_council_engine.tick_autonomous_cadence)
     auth_manager = AuthManager(store=store, settings=sec_settings)
     rate_limiter = DuckDBRateLimiter(
         store=store,
@@ -551,6 +603,7 @@ def create_app(
     app.state.adversarial_engine = adversarial_engine
     app.state.market_driver_engine = market_driver_engine
     app.state.ai_council_engine = ai_council_engine
+    app.state.solana_desk = solana_desk
     app.state.poly_client = poly_client
     app.state.kalshi_client = kalshi_client
     app.state.security_settings = sec_settings
@@ -1036,6 +1089,13 @@ def create_app(
                     **venue_probe,
                 },
                 "kalshi": kalshi_probe,
+                "solana_desk": {
+                    "venue_id": "solana_dex_public",
+                    "mode": "READ_ONLY",
+                    "status": "ACTIVE_SIMULATED",
+                    "provenance": "SIMULATED",
+                    "live_execution": False,
+                },
             },
             "checked_at": utc_now_iso(),
         }
@@ -1307,6 +1367,42 @@ def create_app(
         items = learning_engine.list_regression_cases(limit=limit)
         return {"count": len(items), "items": items}
 
+    @app.post("/api/intelligence/learning/monitor-regressions")
+    async def monitor_learning_regressions(
+        user: AuthenticatedUser = Depends(operator_guard),
+    ) -> dict[str, Any]:
+        return learning_engine.monitor_regressions(actor=user.username)
+
+    @app.post("/api/intelligence/learning/cycles/{cycle_id}/rollback")
+    async def rollback_learning_cycle(
+        cycle_id: str,
+        req: LearningRollbackRequest,
+        request: Request,
+        owner: AuthenticatedUser = Depends(owner_config_guard),
+    ) -> dict[str, Any]:
+        try:
+            rolled = learning_engine.rollback_lesson(
+                cycle_id,
+                actor=owner.username,
+                reason=req.reason,
+            )
+            auth_manager.record_audit_event(
+                event_type="LEARNING_CYCLE_ROLLED_BACK",
+                outcome="SUCCESS",
+                ip_address=resolve_client_ip(request, sec_settings),
+                endpoint=request.url.path,
+                method="POST",
+                user_id=owner.user_id,
+                username=owner.username,
+                role=owner.role,
+                detail={"cycle_id": cycle_id, "reason": req.reason},
+            )
+            return rolled
+        except ValueError as exc:
+            msg = str(exc)
+            code = 404 if "Unknown cycle_id" in msg else 400
+            raise HTTPException(status_code=code, detail=msg) from exc
+
     # ------------------------------------------------------------------
     # Stage 3C: Supervisor, Specialized Agents, Worker Pool & Blocker Recovery
     # ------------------------------------------------------------------
@@ -1533,6 +1629,51 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
+
+    @app.get("/api/intelligence/providers")
+    async def list_model_providers(
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        return model_router.get_provider_registry()
+
+    @app.post("/api/intelligence/providers/probe")
+    async def probe_model_providers(
+        _: AuthenticatedUser = Depends(operator_model_guard),
+    ) -> dict[str, Any]:
+        return await model_router.probe_providers()
+
+    @app.post("/api/intelligence/providers/fallback-order")
+    async def update_provider_fallback_order(
+        req: FallbackOrderUpdateRequest,
+        request: Request,
+        owner: AuthenticatedUser = Depends(owner_config_guard),
+    ) -> dict[str, Any]:
+        try:
+            res = model_router.update_fallback_order(req.fallback_order, actor=owner.username)
+            auth_manager.record_audit_event(
+                event_type="PROVIDER_FALLBACK_ORDER_UPDATED",
+                outcome="SUCCESS",
+                ip_address=resolve_client_ip(request, sec_settings),
+                endpoint=request.url.path,
+                method="POST",
+                user_id=owner.user_id,
+                username=owner.username,
+                role=owner.role,
+                detail={"fallback_order": res["fallback_order"]},
+            )
+            return res
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
+
+    @app.post("/api/intelligence/providers/{provider_id}/clear-cooldown")
+    async def clear_provider_cooldown(
+        provider_id: str,
+        _: AuthenticatedUser = Depends(operator_model_guard),
+    ) -> dict[str, Any]:
+        try:
+            return model_router.clear_provider_cooldown(provider_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=sanitize_error_message(exc)) from exc
 
     @app.get("/api/intelligence/configs")
     async def list_configs(
@@ -1934,6 +2075,38 @@ def create_app(
             raise HTTPException(
                 status_code=502,
                 detail=f"Auto-resolution failed: {sanitize_error_message(exc)}",
+            ) from exc
+
+    @app.get("/api/market-intelligence/weights")
+    async def list_driver_learning_weights(
+        council_type: str | None = Query(default=None),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        norm_council: CouncilType | None = None
+        if council_type is not None:
+            up = council_type.strip().upper()
+            if up not in ("CRYPTO", "STOCKS"):
+                raise HTTPException(
+                    status_code=400, detail="council_type must be CRYPTO or STOCKS"
+                )
+            norm_council = up  # type: ignore[assignment]
+        items = ai_council_engine.get_driver_learning_weights(council_type=norm_council)
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/market-intelligence/learning-cycle/run")
+    async def run_market_learning_cycle_endpoint(
+        req: MarketLearningCycleRequest,
+        _: AuthenticatedUser = Depends(operator_guard),
+    ) -> dict[str, Any]:
+        try:
+            return await ai_council_engine.run_autonomous_learning_cycle(
+                horizon=req.horizon,
+                force_convene=req.force_convene,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Autonomous learning cycle failed: {sanitize_error_message(exc)}",
             ) from exc
 
     # ------------------------------------------------------------------
@@ -2416,11 +2589,290 @@ def create_app(
             "pnl_ledger": store.list_paper_pnl(limit=limit),
         }
 
+    @app.post("/api/paper/blotter/{ledger_id}/resolve")
+    async def resolve_paper_blotter_entry(
+        ledger_id: str,
+        req: PaperBlotterResolveRequest,
+        request: Request,
+        user: AuthenticatedUser = Depends(operator_paper_guard),
+    ) -> dict[str, Any]:
+        clean_ledger_id = ledger_id.strip()
+        if not clean_ledger_id or len(clean_ledger_id) > 80:
+            raise HTTPException(status_code=400, detail="Invalid paper blotter ledger_id.")
+
+        entry = store.get_paper_pnl_entry(clean_ledger_id)
+        if not entry:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Unknown paper blotter ledger_id '{clean_ledger_id}'.",
+            )
+        if entry["resolution_result"] != "PENDING":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Paper blotter entry '{clean_ledger_id}' is already confirmed as "
+                    f"'{entry['resolution_result']}'."
+                ),
+            )
+
+        linked_pred_id = (req.linked_prediction_id or "").strip() or None
+        arena_model_id = (req.arena_model_id or "").strip() or None
+        notes_clean = req.notes.strip()
+
+        if linked_pred_id:
+            existing_pred = prob_engine.get_prediction(linked_pred_id)
+            if not existing_pred:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Unknown linked_prediction_id '{linked_pred_id}'.",
+                )
+            if existing_pred["status"] != "OPEN":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Linked prediction '{linked_pred_id}' is already finalized "
+                        f"with status '{existing_pred['status']}'."
+                    ),
+                )
+
+        resolved_prediction: dict[str, Any] | None = None
+        if linked_pred_id:
+            mapped_outcome: int | str = (
+                1 if req.resolution_result == "YES" else (0 if req.resolution_result == "NO" else "VOID")
+            )
+            resolved_prediction = prob_engine.resolve_prediction(
+                linked_pred_id,
+                outcome=mapped_outcome,
+                resolution_source=f"paper_blotter:{clean_ledger_id}",
+                reviewer_id=user.username,
+            )
+
+        agent_id = (
+            arena_model_id
+            or (resolved_prediction["agent_id"] if resolved_prediction else None)
+            or "paper_execution_desk"
+        )
+        subject_key = f"paper_blotter:{entry['pair_id'].lower()}"
+        expected_outcome: dict[str, Any] = {
+            "execution_id": entry["execution_id"],
+            "pair_id": entry["pair_id"],
+            "outcome_status": entry["outcome_status"],
+            "matched_shares": entry["matched_shares"],
+            "unwound_shares": entry["unwound_shares"],
+            "locked_arb_edge_usd": entry["locked_arb_edge_usd"],
+            "simulated_realized_pnl_usd": entry["realized_pnl_usd"],
+        }
+        if arena_model_id:
+            expected_outcome["arena_model_id"] = arena_model_id
+        if resolved_prediction:
+            expected_outcome["linked_prediction_id"] = linked_pred_id
+            expected_outcome["predicted_prob"] = resolved_prediction["predicted_prob"]
+
+        if req.resolution_result == "VOID":
+            outcome_matched = False
+        elif resolved_prediction and resolved_prediction.get("actual_outcome") in (0, 1):
+            y_val = int(resolved_prediction["actual_outcome"])
+            pred_p = float(resolved_prediction["predicted_prob"])
+            outcome_matched = (pred_p >= 0.5 and y_val == 1) or (pred_p < 0.5 and y_val == 0)
+        else:
+            outcome_matched = (
+                entry["outcome_status"] in ("HEDGED_FULL_FILL", "HEDGED_PARTIAL_LEG1")
+                and float(entry["locked_arb_edge_usd"]) >= 0.0
+                and float(entry["realized_pnl_usd"]) >= 0.0
+            )
+
+        evidence_item: dict[str, Any] = {
+            "source_type": "PAPER_BLOTTER_RESOLUTION",
+            "source_ref_id": clean_ledger_id,
+            "execution_id": entry["execution_id"],
+            "pair_id": entry["pair_id"],
+            "resolution_result": req.resolution_result,
+            "confirmed_by": user.username,
+            "notes": notes_clean,
+        }
+        if arena_model_id:
+            evidence_item["arena_model_id"] = arena_model_id
+        if linked_pred_id:
+            evidence_item["linked_prediction_id"] = linked_pred_id
+        if resolved_prediction and resolved_prediction.get("brier_score") is not None:
+            evidence_item["brier_score"] = resolved_prediction["brier_score"]
+
+        cycle = learning_engine.record_observation(
+            source_type="PAPER_BLOTTER_RESOLUTION",
+            source_ref_id=clean_ledger_id,
+            agent_id=agent_id,
+            subject_key=subject_key,
+            hypothesis=(
+                f"Paper execution {entry['execution_id']} on {entry['pair_id']} "
+                f"({entry['outcome_status']}) confirmed against actual market outcome {req.resolution_result}."
+            ),
+            expected_outcome=expected_outcome,
+            evidence=[evidence_item],
+        )
+        cycle = learning_engine.record_evaluation(
+            cycle["cycle_id"],
+            evaluation_notes=(
+                f"Operator {user.username} manually confirmed market outcome={req.resolution_result}"
+                + (f" for Arena model {arena_model_id}" if arena_model_id else "")
+                + (f" linked to forecast {linked_pred_id}" if linked_pred_id else "")
+                + "."
+            ),
+            evidence=[evidence_item],
+        )
+        cycle = learning_engine.record_decision(
+            cycle["cycle_id"],
+            decision_summary=(
+                f"Record verified outcome {req.resolution_result} for ledger {clean_ledger_id} "
+                "into Learning Core without altering Risk Gate policy."
+            ),
+        )
+        actual_outcome_payload: dict[str, Any] = {
+            "resolution_result": req.resolution_result,
+            "confirmed_by": user.username,
+            "notes": notes_clean,
+            "arena_model_id": arena_model_id,
+            "linked_prediction_id": linked_pred_id,
+        }
+        if resolved_prediction:
+            actual_outcome_payload["prediction_status"] = resolved_prediction["status"]
+            actual_outcome_payload["brier_score"] = resolved_prediction.get("brier_score")
+            actual_outcome_payload["log_loss"] = resolved_prediction.get("log_loss")
+
+        cycle = learning_engine.record_outcome(
+            cycle["cycle_id"],
+            actual_outcome=actual_outcome_payload,
+            outcome_matched=outcome_matched,
+            evidence=[evidence_item],
+        )
+
+        resolved_at = utc_now_iso()
+        updated_entry = store.resolve_paper_pnl_entry(
+            clean_ledger_id,
+            resolution_result=req.resolution_result,
+            resolution_notes=notes_clean,
+            resolved_by=user.username,
+            resolved_at=resolved_at,
+            learning_cycle_id=cycle["cycle_id"],
+            linked_prediction_id=linked_pred_id,
+            arena_model_id=arena_model_id,
+        )
+
+        auth_manager.record_audit_event(
+            event_type="PAPER_BLOTTER_OUTCOME_CONFIRMED",
+            outcome="SUCCESS",
+            ip_address=resolve_client_ip(request, sec_settings),
+            endpoint=f"/api/paper/blotter/{clean_ledger_id}/resolve",
+            method="POST",
+            user_id=user.user_id,
+            username=user.username,
+            role=user.role,
+            detail={
+                "ledger_id": clean_ledger_id,
+                "pair_id": entry["pair_id"],
+                "resolution_result": req.resolution_result,
+                "learning_cycle_id": cycle["cycle_id"],
+                "linked_prediction_id": linked_pred_id,
+                "arena_model_id": arena_model_id,
+            },
+        )
+
+        return {
+            "provenance": "SIMULATED",
+            "live_trading_enabled": False,
+            "entry": updated_entry,
+            "summary": store.get_paper_summary(),
+            "learning_cycle": cycle,
+            "learning_cycle_id": cycle["cycle_id"],
+            "resolved_prediction": resolved_prediction,
+        }
+
+    # ------------------------------------------------------------------
+    # Solana Memecoin Research & Simulated Paper Desk Routes
+    # ------------------------------------------------------------------
+    @app.get("/api/solana/overview")
+    async def solana_overview(
+        limit: int = Query(default=50, ge=1, le=200),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        return solana_desk.get_overview(limit=limit)
+
+    @app.post("/api/solana/discover")
+    async def solana_discover(
+        req: SolanaDiscoverRequest,
+        _: AuthenticatedUser = Depends(analyst_guard),
+    ) -> dict[str, Any]:
+        try:
+            return await solana_desk.discover_pools(query=req.query, limit=req.limit)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Solana pool discovery failed: {sanitize_error_message(exc)}",
+            ) from exc
+
+    @app.post("/api/solana/evaluate")
+    async def solana_evaluate_mint(
+        req: SolanaEvaluateRequest,
+        _: AuthenticatedUser = Depends(analyst_guard),
+    ) -> dict[str, Any]:
+        try:
+            return await solana_desk.evaluate_mint(
+                req.mint,
+                symbol=req.symbol,
+                analyst_mode=req.analyst_mode,
+                preferred_provider=req.preferred_provider,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Solana candidate evaluation failed: {sanitize_error_message(exc)}",
+            ) from exc
+
+    @app.post("/api/solana/paper/open")
+    async def solana_open_paper_position(
+        req: SolanaPaperOpenRequest,
+        request: Request,
+        user: AuthenticatedUser = Depends(operator_paper_guard),
+    ) -> dict[str, Any]:
+        auth_manager.record_audit_event(
+            event_type="SOLANA_PAPER_OPEN_TRIGGERED",
+            outcome="ATTEMPT",
+            ip_address=resolve_client_ip(request, sec_settings),
+            endpoint=request.url.path,
+            method="POST",
+            user_id=user.user_id,
+            username=user.username,
+            role=user.role,
+            detail={"mint": req.mint, "notional_usd": req.notional_usd},
+        )
+        try:
+            return solana_desk.open_paper_position(
+                mint=req.mint,
+                entry_price=req.entry_price,
+                notional_usd=req.notional_usd,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=sanitize_error_message(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
+
+    @app.post("/api/solana/paper/mark")
+    async def solana_mark_paper_positions(
+        req: SolanaPaperMarkRequest,
+        _: AuthenticatedUser = Depends(operator_paper_guard),
+    ) -> dict[str, Any]:
+        try:
+            return await solana_desk.mark_positions(prices=req.prices)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Solana position mark failed: {sanitize_error_message(exc)}",
+            ) from exc
+
     @app.get("/api/modules/status")
     async def modules_status(_: AuthenticatedUser = Depends(read_only_guard)) -> dict[str, Any]:
         counts = store.get_counts()
         return {
-            "phase": "Phase 4A — Authenticated Research & Paper Execution",
+            "phase": "Phase 4A — Authenticated Research, Solana Paper Desk & Paper Execution",
             "modules": get_module_registry(counts),
             "kalshi": {
                 "venue_id": "kalshi",
@@ -2428,6 +2880,14 @@ def create_app(
                 "phase": "Phase 2",
                 "status": "ACTIVE_READ_ONLY",
                 "provenance": "LIVE",
+                "live_execution": False,
+            },
+            "solana_desk": {
+                "venue_id": "solana_dex_public",
+                "name": "Solana Memecoin Research & Paper Desk",
+                "phase": "Unified Milestone",
+                "status": "ACTIVE_SIMULATED",
+                "provenance": "SIMULATED",
                 "live_execution": False,
             },
         }

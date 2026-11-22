@@ -354,3 +354,117 @@ def test_market_councils_api_rbac_and_fail_closed_unavailable_feeds(monkeypatch)
         assert res.status_code == 200
         assert res.json()["status"] == "RESOLVED"
         assert res.json()["actual_outcome"] == 1
+        assert res.json()["directional_brier_score"] is not None
+
+        weights_resp = client.get("/api/market-intelligence/weights")
+        assert weights_resp.status_code == 200
+        assert weights_resp.json()["count"] >= 1
+
+        # READ_ONLY cannot trigger autonomous learning cycle, OWNER can
+        assert (
+            ro_client.post(
+                "/api/market-intelligence/learning-cycle/run",
+                json={"horizon": "24H"},
+            ).status_code
+            == 403
+        )
+        cyc_resp = client.post(
+            "/api/market-intelligence/learning-cycle/run",
+            json={"horizon": "24H", "force_convene": False},
+        )
+        assert cyc_resp.status_code == 200
+        cyc_body = cyc_resp.json()
+        assert cyc_body["skipped"] is False
+        assert cyc_body["state"]["cycles_completed"] >= 1
+
+
+def test_closed_loop_adaptive_driver_weights_and_autonomous_learning_cycle(monkeypatch):
+    import asyncio
+
+    async def _run():
+        app = create_app(db_path=":memory:", enable_background_loop=False)
+        drivers = app.state.market_driver_engine
+        councils = app.state.ai_council_engine
+        learning = app.state.learning_engine
+        store = app.state.store
+        try:
+            async def _live_feeds(*_args, **_kwargs):
+                return _sample_raw_feeds(btc_chg=3.6, qqq_chg=1.5, comp=0.62)
+
+            monkeypatch.setattr(drivers, "fetch_raw_feeds", _live_feeds)
+
+            # 1. Initial SIMULATED forecast must NEVER alter clean LIVE driver_learning_weights
+            sim_snap = drivers.analyze_and_persist(_sample_raw_feeds(), provenance="SIMULATED", persist=True)
+            sim_fc = councils.convene_councils(
+                snapshot=sim_snap, councils=["CRYPTO"], horizon="24H", create_forecasts=True
+            )["created_forecasts"][0]
+            assert len(sim_fc["driver_signals"]) >= 1
+            councils.resolve_forecast(sim_fc["forecast_id"], actual_price=72000.0)
+            assert councils.get_driver_learning_weights() == []
+
+            # 2. Clean LIVE deliberation snapshots driver_signals and baseline 1.0 weights
+            live_snap = await drivers.ingest_live_snapshot()
+            conv1 = councils.convene_councils(
+                snapshot=live_snap, councils=["CRYPTO"], horizon="24H", create_forecasts=True
+            )
+            base_up_prob = conv1["deliberations"]["CRYPTO"]["up_prob"]
+            fc1 = conv1["created_forecasts"][0]
+            assert len(fc1["driver_signals"]) >= 3
+
+            # Resolve with a strong downward miss so positive causal drivers are dampened and Calibration Auditor applies a verified weight-guard regression
+            res1 = councils.resolve_forecast(fc1["forecast_id"], actual_price=82000.0)
+            assert res1["directional_hit"] is False
+            assert res1["directional_brier_score"] > 0.25
+            weights_after = councils.get_driver_learning_weights(council_type="CRYPTO")
+            assert len(weights_after) >= 2
+            for w in weights_after:
+                assert 0.45 <= w["weight"] <= 1.55
+                assert w["sample_count"] == 1
+
+            # Verify CALIBRATION_WEIGHT_GUARD regression case ran and lesson moved to APPLIED
+            reg_cases = [
+                c for c in learning.list_regression_cases() if c.get("category") == "CALIBRATION_WEIGHT_GUARD"
+            ]
+            assert len(reg_cases) >= 1
+            assert reg_cases[0]["status"] == "PASSING"
+
+            # Subsequent LIVE deliberation actively reflects learned weights in Edge Analyst metrics & probability
+            conv2 = councils.convene_councils(
+                snapshot=live_snap, councils=["CRYPTO"], horizon="24H", create_forecasts=True
+            )
+            edge2 = next(
+                op for op in conv2["deliberations"]["CRYPTO"]["agent_opinions"] if op["role"] == "Edge Analyst"
+            )
+            assert edge2["key_metrics"]["learned_up_delta"] != 0.0
+            assert conv2["deliberations"]["CRYPTO"]["up_prob"] != base_up_prob
+
+            # Clean calibration exposes directional Brier and excludes the SIMULATED forecast
+            cal = councils.get_clean_calibration_metrics(council_type="CRYPTO", include_non_live=False)
+            assert cal["resolved_count"] == 1
+            assert cal["mean_directional_brier_score"] == pytest.approx(res1["directional_brier_score"], abs=1e-6)
+            assert cal["excluded_non_live_or_unverified_count"] == 1
+
+            # 3. Backdate the open CRYPTO forecast to test due auto-resolution + missing council replenishment inside autonomous cycle
+            fc2 = conv2["created_forecasts"][0]
+            with store._lock:
+                store._conn.execute(
+                    "UPDATE movement_forecasts SET resolve_after = ? WHERE forecast_id = ?",
+                    ["2020-01-01T00:00:00+00:00", fc2["forecast_id"]],
+                )
+
+            cyc = await councils.run_autonomous_learning_cycle(horizon="24H", force_convene=False)
+            assert cyc["skipped"] is False
+            assert cyc["resolved_count"] == 1
+            assert set(cyc["convened_councils"]) == {"CRYPTO", "STOCKS"}
+            assert councils.get_forecast(fc2["forecast_id"])["status"] == "RESOLVED"
+
+            # 4. Kill switch fails closed cleanly during autonomous cycle
+            store.set_kill_switch(True, "Test autonomous halt", actor="pytest")
+            halted = await councils.run_autonomous_learning_cycle(horizon="24H", force_convene=False)
+            assert halted["skipped"] is True
+            assert halted["reason"] == "KILL_SWITCH_ACTIVE"
+        finally:
+            store.close()
+
+    asyncio.run(_run())
+

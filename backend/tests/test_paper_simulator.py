@@ -406,3 +406,221 @@ def test_fastapi_cross_venue_and_paper_blotter_routes():
         assert tiers["paper_executor"]["status"] == "ACTIVE_SIMULATED"
         assert tiers["tier2_delta_neutral"]["status"] == "INACTIVE"
         assert tiers["tier3_ai_research"]["status"] == "INACTIVE"
+
+
+def test_paper_blotter_manual_resolution_and_learning_loop():
+    app = create_app(db_path=":memory:")
+    with TestClient(app) as client:
+        authenticate_test_client(client)
+        app.state.poly_client = _StubPolyClient()
+        app.state.kalshi_client = _StubKalshiClient()
+        app.state.cross_scanner.poly_client = app.state.poly_client
+        app.state.cross_scanner.kalshi_client = app.state.kalshi_client
+        app.state.paper_engine.poly_client = app.state.poly_client
+        app.state.paper_engine.kalshi_client = app.state.kalshi_client
+
+        # Register verified pair & run two paper executions
+        reg = client.post(
+            "/api/cross-venue/pairs",
+            json={
+                "pair_id": "XPAIR-RES-TEST",
+                "poly_market_id": "POLY-CPI-26",
+                "kalshi_ticker": "KXCPI-26DEC-T30",
+                "resolution_source_verified": True,
+                "predicate_verified": True,
+                "void_rules_compatible": True,
+            },
+        )
+        assert reg.status_code == 200
+
+        exec1 = client.post(
+            "/api/paper/execute",
+            json={"pair_id": "XPAIR-RES-TEST", "target_shares": 25.0, "scenario": "LIVE_BOOKS"},
+        )
+        assert exec1.status_code == 200
+        ledger1_id = exec1.json()["pnl_entry"]["ledger_id"]
+
+        exec2 = client.post(
+            "/api/paper/execute",
+            json={"pair_id": "XPAIR-RES-TEST", "target_shares": 10.0, "scenario": "LIVE_BOOKS"},
+        )
+        assert exec2.status_code == 200
+        ledger2_id = exec2.json()["pnl_entry"]["ledger_id"]
+
+        # Verify default PENDING resolution_result & summary counts
+        blotter_before = client.get("/api/paper/blotter").json()
+        assert blotter_before["summary"]["resolved_entries_count"] == 0
+        assert blotter_before["summary"]["pending_resolution_count"] == 2
+        by_id = {row["ledger_id"]: row for row in blotter_before["pnl_ledger"]}
+        assert by_id[ledger1_id]["resolution_result"] == "PENDING"
+        assert by_id[ledger2_id]["resolution_result"] == "PENDING"
+
+        # Create an open Arena forecast prediction to link to ledger1
+        pred_res = client.post(
+            "/api/intelligence/predictions",
+            json={
+                "agent_id": "arena:gemini-2.5-pro",
+                "market_id": "POLY-CPI-26",
+                "venue": "polymarket",
+                "subject_key": "cpi_dec_2026",
+                "question": "Will US CPI exceed 3.0% in Dec 2026?",
+                "predicted_prob": 0.80,
+                "market_implied_prob": 0.55,
+                "confidence": 0.78,
+                "rationale": "Arena forecast for CPI threshold.",
+                "provenance": "LIVE",
+            },
+        )
+        assert pred_res.status_code == 200
+        pred_id = pred_res.json()["prediction_id"]
+
+        # Invalid enum rejected with 422, unknown ledger rejected with 404
+        assert (
+            client.post(
+                f"/api/paper/blotter/{ledger1_id}/resolve",
+                json={"resolution_result": "MAYBE"},
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/api/paper/blotter/PPNL-DOES-NOT-EXIST/resolve",
+                json={"resolution_result": "YES"},
+            ).status_code
+            == 404
+        )
+
+        # Confirm actual market outcome YES with linked Arena forecast
+        confirm1 = client.post(
+            f"/api/paper/blotter/{ledger1_id}/resolve",
+            json={
+                "resolution_result": "YES",
+                "notes": "Official BLS CPI release confirmed > 3.0%.",
+                "linked_prediction_id": pred_id,
+                "arena_model_id": "arena:gemini-2.5-pro",
+            },
+        )
+        assert confirm1.status_code == 200, confirm1.text
+        c1 = confirm1.json()
+        assert c1["provenance"] == "SIMULATED"
+        assert c1["live_trading_enabled"] is False
+        assert c1["entry"]["resolution_result"] == "YES"
+        assert c1["entry"]["resolved_by"] == "testowner"
+        assert c1["entry"]["linked_prediction_id"] == pred_id
+        assert c1["entry"]["arena_model_id"] == "arena:gemini-2.5-pro"
+        assert c1["entry"]["learning_cycle_id"].startswith("LCYC-")
+        assert c1["summary"]["resolved_entries_count"] == 1
+        assert c1["summary"]["pending_resolution_count"] == 1
+        assert c1["resolved_prediction"]["status"] == "RESOLVED"
+        assert c1["resolved_prediction"]["actual_outcome"] == 1
+        assert c1["resolved_prediction"]["brier_score"] == pytest.approx(0.04, abs=1e-4)
+        assert c1["learning_cycle"]["stage"] == "OUTCOME"
+        assert c1["learning_cycle"]["source_type"] == "PAPER_BLOTTER_RESOLUTION"
+        assert c1["learning_cycle"]["source_ref_id"] == ledger1_id
+        assert c1["learning_cycle"]["outcome_matched"] is True
+
+        # Fail closed on duplicate resolution attempt
+        dup = client.post(
+            f"/api/paper/blotter/{ledger1_id}/resolve",
+            json={"resolution_result": "NO"},
+        )
+        assert dup.status_code == 409
+
+        # Confirm second entry as VOID -> recorded with outcome_matched=False
+        confirm2 = client.post(
+            f"/api/paper/blotter/{ledger2_id}/resolve",
+            json={
+                "resolution_result": "VOID",
+                "notes": "Venue voided contract due to source ambiguity.",
+            },
+        )
+        assert confirm2.status_code == 200
+        c2 = confirm2.json()
+        assert c2["entry"]["resolution_result"] == "VOID"
+        assert c2["learning_cycle"]["outcome_matched"] is False
+        assert c2["summary"]["resolved_entries_count"] == 2
+        assert c2["summary"]["pending_resolution_count"] == 0
+
+
+def test_paper_blotter_resolution_rbac_and_csrf_enforced():
+    app = create_app(db_path=":memory:")
+    with TestClient(app) as owner_client:
+        authenticate_test_client(owner_client)
+        app.state.store.record_paper_pnl({
+            "ledger_id": "PPNL-RBAC-001",
+            "execution_id": "PEXEC-RBAC-001",
+            "pair_id": "XPAIR-RBAC",
+            "event_type": "HEDGED_ENTRY",
+            "outcome_status": "HEDGED_FULL_FILL",
+            "matched_shares": 25.0,
+            "unwound_shares": 0.0,
+            "gross_cost_usd": 23.0,
+            "fees_usd": 0.4,
+            "realized_pnl_usd": 0.0,
+            "locked_arb_edge_usd": 1.6,
+            "notes": "RBAC verification row",
+            "provenance": "SIMULATED",
+            "recorded_at": utc_now_iso(),
+        })
+
+        # Create READ_ONLY, ANALYST, and OPERATOR users
+        for uname, role in [
+            ("ro_blotter", "READ_ONLY"),
+            ("an_blotter", "ANALYST"),
+            ("op_blotter", "OPERATOR"),
+        ]:
+            resp = owner_client.post(
+                "/api/admin/users",
+                json={
+                    "username": uname,
+                    "password": "Strong-Role-Pass!2026",
+                    "role": role,
+                    "email": f"{uname}@certainty.local",
+                },
+            )
+            assert resp.status_code == 200, resp.text
+
+        # Unauthenticated request rejected (401)
+        anon = TestClient(app)
+        assert (
+            anon.post(
+                "/api/paper/blotter/PPNL-RBAC-001/resolve",
+                json={"resolution_result": "YES"},
+            ).status_code
+            == 401
+        )
+
+        # READ_ONLY and ANALYST rejected (403)
+        for uname in ("ro_blotter", "an_blotter"):
+            low_client = TestClient(app)
+            authenticate_test_client(
+                low_client, username=uname, password="Strong-Role-Pass!2026"
+            )
+            res = low_client.post(
+                "/api/paper/blotter/PPNL-RBAC-001/resolve",
+                json={"resolution_result": "YES"},
+            )
+            assert res.status_code == 403
+
+        # OPERATOR without CSRF token rejected (403), then succeeds with CSRF token (200)
+        op_client = TestClient(app)
+        authenticate_test_client(
+            op_client, username="op_blotter", password="Strong-Role-Pass!2026"
+        )
+        saved_csrf = op_client.headers.pop("X-CSRF-Token", None)
+        no_csrf = op_client.post(
+            "/api/paper/blotter/PPNL-RBAC-001/resolve",
+            json={"resolution_result": "NO"},
+        )
+        assert no_csrf.status_code == 403
+
+        if saved_csrf:
+            op_client.headers["X-CSRF-Token"] = saved_csrf
+        ok = op_client.post(
+            "/api/paper/blotter/PPNL-RBAC-001/resolve",
+            json={"resolution_result": "NO", "notes": "Confirmed by operator"},
+        )
+        assert ok.status_code == 200
+        assert ok.json()["entry"]["resolution_result"] == "NO"
+        assert ok.json()["entry"]["resolved_by"] == "op_blotter"
+

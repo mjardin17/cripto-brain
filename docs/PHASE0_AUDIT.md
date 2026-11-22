@@ -1,7 +1,8 @@
 # Phase 0 Audit — Dependencies, Exchange APIs, and Research Verification
 
 **Audit Date:** 2026-11-12  
-**Scope:** Workspace repositories, system runtimes, Python/Node packages, Polymarket Gamma & CLOB V2 APIs, Kalshi V2 API, and fee/arbitrage claims.
+**Scope:** Workspace repositories, system runtimes, Python/Node packages, Polymarket Gamma & CLOB V2 APIs, Kalshi V2 API, and fee/arbitrage claims.  
+**Reconciliation Note:** Historical Phase 0 baseline snapshot. Kalshi V2 read-only, Cross-Venue Paper Simulator, Stage 3-4A Authentication/Workforce/Learning Core, the Nov 16 `data_age_ms = fetch_age_ms` freshness correction, and the Solana Research Desk are now active; see `docs/ARCHITECTURE.md` and `docs/SECURITY_AND_OPERATIONS.md` for current invariants.
 
 ---
 

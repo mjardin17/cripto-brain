@@ -3,6 +3,7 @@ import {
   ArrowLeftRight,
   BookOpen,
   BrainCircuit,
+  Coins,
   KeyRound,
   Layers,
   ShieldAlert,
@@ -16,6 +17,7 @@ export type WorkspaceTab =
   | 'councils'
   | 'scanner'
   | 'cross_venue'
+  | 'solana'
   | 'intelligence'
   | 'risk'
   | 'architecture'
@@ -59,6 +61,12 @@ const NAV_ITEMS: Array<{
     label: 'Cross-Venue & Paper',
     subtitle: 'Kalshi matcher & simulator',
     Icon: ArrowLeftRight,
+  },
+  {
+    id: 'solana',
+    label: 'Solana Research Desk',
+    subtitle: '6-agent DEX & paper ledger',
+    Icon: Coins,
   },
   {
     id: 'intelligence',

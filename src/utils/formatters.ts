@@ -392,3 +392,141 @@ export function parseApiJsonResponse(
   return { ok: true, status, data: parsedBody, errorDetail: null };
 }
 
+export function formatDriverWeightMultiplier(weight: number | null | undefined): string {
+  if (weight === null || weight === undefined || !Number.isFinite(weight)) {
+    return '1.00x';
+  }
+  return `${weight.toFixed(2)}x`;
+}
+
+export function summarizeDriverLearningWeight(
+  weight: number | null | undefined,
+  sampleCount: number | null | undefined,
+  cumulativeSkill: number | null | undefined
+): {
+  badge: 'UPWEIGHTED' | 'DAMPENED' | 'BASELINE';
+  label: string;
+  toneClass: string;
+} {
+  const w = typeof weight === 'number' && Number.isFinite(weight) ? weight : 1.0;
+  const samples = typeof sampleCount === 'number' && Number.isFinite(sampleCount) ? sampleCount : 0;
+  const skill =
+    typeof cumulativeSkill === 'number' && Number.isFinite(cumulativeSkill) ? cumulativeSkill : 0;
+
+  if (samples <= 0) {
+    return {
+      badge: 'BASELINE',
+      label: 'BASELINE (1.00x)',
+      toneClass: 'text-slate-300 border-slate-700 bg-slate-800/70',
+    };
+  }
+  if (w >= 1.05 || (w > 1.0 && skill > 0)) {
+    return {
+      badge: 'UPWEIGHTED',
+      label: `UPWEIGHTED (${w.toFixed(2)}x)`,
+      toneClass: 'text-emerald-300 border-emerald-700/70 bg-emerald-950/30',
+    };
+  }
+  if (w <= 0.95 || (w < 1.0 && skill < 0)) {
+    return {
+      badge: 'DAMPENED',
+      label: `DAMPENED (${w.toFixed(2)}x)`,
+      toneClass: 'text-rose-300 border-rose-700/70 bg-rose-950/30',
+    };
+  }
+  return {
+    badge: 'BASELINE',
+    label: `BASELINE (${w.toFixed(2)}x)`,
+    toneClass: 'text-sky-300 border-sky-700/70 bg-sky-950/30',
+  };
+}
+
+export function formatSolanaTokenPrice(price: number | null | undefined): string {
+  if (price === null || price === undefined || !Number.isFinite(price)) {
+    return '—';
+  }
+  if (price === 0) return '$0.00';
+  if (price < 0.0001) return `$${price.toFixed(8)}`;
+  if (price < 0.01) return `$${price.toFixed(6)}`;
+  if (price < 1) return `$${price.toFixed(4)}`;
+  return `$${price.toFixed(2)}`;
+}
+
+export function summarizeSolanaCandidateStatus(status: string): {
+  label: string;
+  toneClass: string;
+} {
+  switch (status) {
+    case 'PAPER_ENTERED':
+      return { label: 'PAPER ENTERED', toneClass: 'text-cyan-300' };
+    case 'PAPER_QUOTE_REQUIRED':
+      return { label: 'READY FOR PAPER QUOTE', toneClass: 'text-emerald-400' };
+    case 'NO_TRADE':
+      return { label: 'NO TRADE (SCORE/BAL)', toneClass: 'text-amber-400' };
+    case 'REJECTED':
+      return { label: 'REJECTED (FAIL-CLOSED)', toneClass: 'text-rose-400' };
+    case 'DISCOVERED':
+    default:
+      return { label: status || 'DISCOVERED', toneClass: 'text-slate-300' };
+  }
+}
+
+export function summarizeProviderStatus(status: string): {
+  label: string;
+  toneClass: string;
+} {
+  switch (status) {
+    case 'AVAILABLE':
+      return { label: 'AVAILABLE', toneClass: 'text-emerald-400' };
+    case 'RATE_LIMITED':
+      return { label: 'RATE LIMITED', toneClass: 'text-amber-400' };
+    case 'UNAVAILABLE':
+    default:
+      return { label: 'UNAVAILABLE', toneClass: 'text-slate-400' };
+  }
+}
+
+export function summarizeBlotterResolution(result: string | null | undefined): {
+  label: string;
+  toneClass: string;
+  isPending: boolean;
+} {
+  const normalized = (result ?? 'PENDING').trim().toUpperCase();
+  switch (normalized) {
+    case 'YES':
+      return {
+        label: 'YES',
+        toneClass: 'text-emerald-300 border-emerald-700/70 bg-emerald-950/30',
+        isPending: false,
+      };
+    case 'NO':
+      return {
+        label: 'NO',
+        toneClass: 'text-rose-300 border-rose-700/70 bg-rose-950/30',
+        isPending: false,
+      };
+    case 'VOID':
+      return {
+        label: 'VOID',
+        toneClass: 'text-amber-300 border-amber-700/70 bg-amber-950/30',
+        isPending: false,
+      };
+    case 'PENDING':
+    default:
+      return {
+        label: 'PENDING',
+        toneClass: 'text-slate-300 border-slate-700 bg-slate-800/70',
+        isPending: true,
+      };
+  }
+}
+
+export function canConfirmBlotterResolution(
+  resolutionResult: string | null | undefined,
+  canResolve: boolean
+): boolean {
+  if (!canResolve) return false;
+  return summarizeBlotterResolution(resolutionResult).isPending;
+}
+
+

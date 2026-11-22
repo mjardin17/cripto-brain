@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Activity, AlertTriangle, RefreshCw, ShieldCheck, Users } from 'lucide-react';
+import { Activity, AlertTriangle, PlayCircle, RefreshCw, ShieldCheck, Sliders, Users } from 'lucide-react';
 import { certaintyApi } from '../api/client';
 import type {
   CouncilDeliberationRecord,
@@ -7,11 +7,13 @@ import type {
   UserPermissions,
 } from '../types/certainty';
 import {
+  formatDurationSeconds,
   formatPct,
   formatProbPct,
   formatScoreMetric,
   formatTimestampShort,
   formatUsd,
+  summarizeDriverLearningWeight,
 } from '../utils/formatters';
 import { ProvenanceLabel } from './ProvenanceLabel';
 
@@ -188,13 +190,15 @@ export function MarketCouncilsView({
   const ibit = snap?.assets?.IBIT;
   const okxBtc = snap?.derivatives?.BTC;
   const cal = data?.calibration_live_only;
+  const scheduler = data?.scheduler_state;
+  const driverWeights = data?.driver_weights ?? [];
 
   return (
     <div className="space-y-6">
       {/* Action Header Bar */}
       <section className="border border-slate-800 bg-[#111827] rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="text-base font-semibold text-slate-100">
               Market Drivers &amp; Stocks / Crypto AI Councils
             </h1>
@@ -271,8 +275,54 @@ export function MarketCouncilsView({
             <ShieldCheck className="w-3.5 h-3.5" />
             Resolve Due
           </button>
+
+          <button
+            type="button"
+            disabled={busy !== null || !canResolve || !canSubmit}
+            title={
+              canResolve
+                ? 'Ingest live market feeds, resolve due LIVE forecasts, and replenish missing open councils'
+                : 'Requires OPERATOR or OWNER role'
+            }
+            onClick={() =>
+              void runAction('learning-cycle', async () => {
+                const res = await certaintyApi.runMarketLearningCycle({
+                  horizon,
+                  force_convene: false,
+                });
+                if (res.skipped) {
+                  return `Learning cycle skipped (${res.reason ?? 'GUARD'}).`;
+                }
+                return `Learning cycle completed on ${res.snapshot_id ?? 'snapshot'}: resolved ${res.resolved_count ?? 0} due forecast(s), convened ${(res.convened_councils ?? []).length} missing council(s).`;
+              })
+            }
+            className="px-3 py-1.5 text-xs font-medium bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg inline-flex items-center gap-1.5"
+          >
+            <PlayCircle className="w-3.5 h-3.5" />
+            Run Learning Cycle
+          </button>
         </div>
       </section>
+
+      {/* Autonomous Market-Driver & Learning Cadence Status Bar */}
+      {scheduler ? (
+        <section className="border border-slate-800/90 bg-[#0E1522] rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <span className="font-mono uppercase tracking-wider text-[11px] text-sky-400">
+              Autonomous Learning Cadence
+            </span>
+            <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-[11px] text-slate-200">
+              {scheduler.last_status} · every {formatDurationSeconds(scheduler.cadence_seconds)}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-4 font-mono text-[11px] text-slate-400 tabular-nums">
+            <span>Cycles: {scheduler.cycles_completed}</span>
+            <span>Auto-Resolved: {scheduler.total_auto_resolved}</span>
+            <span>Auto-Convened: {scheduler.total_auto_convened}</span>
+            <span>Last Run: {scheduler.last_run_at ? formatTimestampShort(scheduler.last_run_at) : 'Pending first cadence'}</span>
+          </div>
+        </section>
+      ) : null}
 
       {notice ? (
         <div
@@ -347,11 +397,14 @@ export function MarketCouncilsView({
             <span className="text-xs text-slate-400">Clean LIVE Brier Calibration</span>
             <ProvenanceLabel provenance="LIVE" detail="Isolated" />
           </div>
-          <div className="text-lg font-mono font-semibold tabular-nums text-slate-100">
-            Brier: {formatScoreMetric(cal?.mean_brier_score, 4)}
+          <div className="text-base font-mono font-semibold tabular-nums text-slate-100 flex flex-wrap items-baseline gap-x-2">
+            <span className="whitespace-nowrap">Move {formatScoreMetric(cal?.mean_brier_score, 4)}</span>
+            <span className="text-slate-600" aria-hidden="true">·</span>
+            <span className="whitespace-nowrap">Dir {formatScoreMetric(cal?.mean_directional_brier_score, 4)}</span>
           </div>
           <div className="text-xs font-mono text-slate-400 tabular-nums">
-            Resolved: {cal?.resolved_count ?? 0} · Open: {cal?.open_count ?? 0} · Excluded Test/Sim:{' '}
+            Dir Acc {cal?.directional_accuracy_pct != null ? `${cal.directional_accuracy_pct}%` : '—'} · Resolved:{' '}
+            {cal?.resolved_count ?? 0} · Open: {cal?.open_count ?? 0} · Excluded:{' '}
             {cal?.excluded_non_live_or_unverified_count ?? 0}
           </div>
         </div>
@@ -457,6 +510,60 @@ export function MarketCouncilsView({
         <CouncilPanel council={data?.stocks_council ?? null} />
       </div>
 
+      {/* Closed-Loop Adaptive Causal Driver Weights (Clean LIVE Only) */}
+      <section className="border border-slate-800 bg-[#111827] rounded-xl p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="flex items-center gap-2">
+              <Sliders className="w-4 h-4 text-sky-400" />
+              <h2 className="text-sm font-semibold text-slate-100">
+                Adaptive Causal Driver Weights (Clean LIVE Feedback Loop)
+              </h2>
+            </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Each resolved clean LIVE forecast reinforces accurate causal drivers and dampens misleading signals within bounded [0.45x, 1.55x] limits. TEST and SIMULATED data never alter weights.
+            </p>
+          </div>
+          <ProvenanceLabel provenance="LIVE" detail={`${driverWeights.length} Active Weight(s)`} />
+        </div>
+
+        {driverWeights.length === 0 ? (
+          <div className="p-4 rounded-lg bg-[#0E1522] border border-slate-800 text-xs text-slate-400">
+            All causal driver weights are at baseline (1.00x). Once at least one clean LIVE movement forecast resolves, driver hit/miss attribution will update these weights and calibrate future AI Council probabilities.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {driverWeights.map((w) => {
+              const summary = summarizeDriverLearningWeight(w.weight, w.sample_count, w.cumulative_skill);
+              return (
+                <div
+                  key={w.weight_key}
+                  className="p-3.5 rounded-lg bg-[#0E1522] border border-slate-800 space-y-2 text-xs"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono font-semibold text-slate-100">
+                      {w.council_type} · {w.driver_id}
+                    </span>
+                    <span className={`px-2 py-0.5 rounded border font-mono text-[10px] ${summary.toneClass}`}>
+                      {summary.label}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] text-slate-400 tabular-nums">
+                    <span>
+                      Hits/Misses: {w.hit_count}/{w.miss_count} ({w.sample_count} samples)
+                    </span>
+                    <span className={w.cumulative_skill >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                      Skill {w.cumulative_skill >= 0 ? '+' : ''}
+                      {w.cumulative_skill.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
       {/* Verifiable Movement Forecast Tracker */}
       <section className="border border-slate-800 bg-[#111827] rounded-xl p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -511,19 +618,29 @@ export function MarketCouncilsView({
                       {f.actual_return_pct != null ? ` (${formatPct(f.actual_return_pct, 2, true)})` : ''}
                     </td>
                     <td className="py-2 pr-3 font-mono text-[11px]">
-                      <span
-                        className={
-                          f.status === 'RESOLVED'
-                            ? 'text-emerald-400'
-                            : f.status === 'VOIDED'
-                            ? 'text-slate-400'
-                            : 'text-amber-300'
-                        }
-                      >
-                        {f.status}
-                      </span>
-                      {f.brier_score != null ? ` · Brier ${f.brier_score.toFixed(4)}` : ''}
-                      {f.learning_cycle_id ? ` · ${f.learning_cycle_id}` : ''}
+                      <div>
+                        <span
+                          className={
+                            f.status === 'RESOLVED'
+                              ? 'text-emerald-400'
+                              : f.status === 'VOIDED'
+                              ? 'text-slate-400'
+                              : 'text-amber-300'
+                          }
+                        >
+                          {f.status}
+                        </span>
+                        {f.brier_score != null ? ` · Move ${f.brier_score.toFixed(4)}` : ''}
+                        {f.directional_brier_score != null
+                          ? ` · Dir ${f.directional_brier_score.toFixed(4)} (${f.directional_hit ? 'HIT' : 'MISS'})`
+                          : ''}
+                      </div>
+                      {(f.learning_cycle_id || (f.driver_signals?.length ?? 0) > 0) ? (
+                        <div className="text-slate-500">
+                          {f.learning_cycle_id ? `${f.learning_cycle_id} · ` : ''}
+                          {(f.driver_signals?.length ?? 0)} driver(s) attributed
+                        </div>
+                      ) : null}
                     </td>
                     <td className="py-2">
                       {f.status === 'OPEN' ? (

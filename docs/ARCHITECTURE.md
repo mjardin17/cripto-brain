@@ -53,8 +53,24 @@
 │  ├── backend/execution/          Simulated Execution Engine             │
 │  │     └── paper_simulator.py    Paper orders, drift, partial & unwind  │
 │  │                                                                      │
-│  ├── backend/future/             Module Registry & Inactive Tier 2/3    │
-│  │     └── modules.py            Phase 2 + inactive Tier 2/3 contracts  │
+│  ├── backend/future/             Module Registry & Inactive Tier 2      │
+│  │     └── modules.py            Active subsystems & Tier 2 stub        │
+│  │                                                                      │
+│  ├── backend/intelligence/       Unified AI Workforce & Learning Core   │
+│  │     ├── supervisor.py         Lease-fenced 5-role orchestrator       │
+│  │     ├── agents.py             Polymarket, Kalshi, Solana & Risk roles│
+│  │     ├── learning_engine.py    10-step observe->verify->rollback loop │
+│  │     ├── memory_manager.py     Versioned tiered memory                │
+│  │     ├── model_router.py       Multi-provider free/budget-capped AI   │
+│  │     ├── councils.py           Separate Crypto & Stocks AI Councils   │
+│  │     └── validation_labs.py    Soak, concurrency & adversarial labs   │
+│  │                                                                      │
+│  ├── backend/solana_desk/        Solana Memecoin Research & Paper Desk  │
+│  │     ├── providers.py          DexScreener/Gecko/RPC/RugCheck/Jupiter │
+│  │     ├── filters.py            Fail-closed deterministic token checks │
+│  │     ├── analyst.py            ModelRouter-backed & deterministic eval│
+│  │     ├── risk.py               8% cap, -6% hard & +12%->-6% trailing  │
+│  │     └── engine.py             PersistentSolanaDesk + DuckDB ledger   │
 │  │                                                                      │
 │  └── backend/storage/            DuckDB Analytical, Audit & Memory      │
 │        └── duckdb_store.py       Thread-safe schema, audit, paper ledger│
@@ -65,26 +81,19 @@
 
 ## 3. DuckDB Data Model (`data/certainty_stack.duckdb`)
 
-1. **`market_snapshots`**:
-   - Captures every scanned Polymarket market condition (`snapshot_id`, `scan_id`, `market_id`, `condition_id`, `question`, `slug`, `yes_token_id`, `no_token_id`, `yes_best_ask`, `no_best_ask`, `yes_best_bid`, `no_best_bid`, `yes_ask_depth_shares`, `no_ask_depth_shares`, `fee_rate`, `fees_enabled`, `neg_risk`, `clob_timestamp_ms`, `book_payload_json`, `ingested_at`).
-2. **`arbitrage_opportunities`**:
-   - Logs every evaluated Polymarket intra-venue pair (`opp_id`, `scan_id`, `market_id`, `condition_id`, `question`, `slug`, `venue`, `target_shares`, `yes_vwap`, `no_vwap`, `combined_raw_cost`, `taker_fees_usd`, `slippage_buffer_usd`, `total_executable_cost`, `guaranteed_payout`, `gross_edge_pct`, `net_edge_pct`, `liquidity_participation_pct`, `leg_imbalance_ratio`, `executable`, `risk_gate_approved`, `risk_gate_reason`, `data_age_ms`, `evaluated_at`).
-3. **`cross_venue_pairs`** & **`cross_venue_opportunities`**:
-   - Stores registered Polymarket <-> Kalshi contract pairs with fail-closed settlement verification checks (`identical_settlement_verified`, `settlement_status`, `cutoff_delta_hours`, `mismatch_reasons_json`) and live dual-route cross-venue scan evaluations.
-4. **`paper_orders`**, **`paper_fills`**, **`paper_positions`**, & **`paper_pnl_ledger`**:
-   - Persists all simulated paper orders, leg fills, resting-bid unwinds (`is_unwind=TRUE`), open hedged/unhedged exposures (`OPEN_HEDGED`, `UNWOUND`, `OPEN_UNHEDGED`), and realized unwind P&L / locked carry (`provenance='SIMULATED'`).
-5. **`risk_gate_audit`**:
-   - Immutable authorization log (`audit_id`, `request_id`, `venue`, `strategy_tier`, `execution_mode`, `market_id`, `requested_notional_usd`, `net_edge_pct`, `liquidity_participation_pct`, `data_age_ms`, `decision`, `failed_rules_json`, `kill_switch_active`, `summary`, `decided_at`).
-6. **`agent_memory`**:
-   - Provider-independent persistent knowledge & blocker escalation (`memory_id`, `category`, `title`, `summary`, `evidence_json`, `status`, `created_at`).
-7. **`system_state`**:
-   - Key-value operational state (e.g., `kill_switch_active`).
+1. **`market_snapshots`** & **`arbitrage_opportunities`**: Polymarket Gamma + CLOB V2 books and net-edge evaluations (`data_age_ms = fetch_age_ms` per Nov 16 correction).
+2. **`cross_venue_pairs`** & **`cross_venue_opportunities`**: Polymarket <-> Kalshi settlement assessments (`identical_settlement_verified`) and dual-route spread scans.
+3. **`paper_orders`**, **`paper_fills`**, **`paper_positions`**, & **`paper_pnl_ledger`**: Cross-venue simulated paper blotter (`provenance='SIMULATED'`).
+4. **`solana_candidates`**, **`solana_paper_positions`**, & **`solana_paper_events`**: Solana pool discovery, timestamped raw safety evidence, fail-closed evaluations, simulated positions, and six-agent logs.
+5. **`risk_gate_audit`**: Immutable authorization log (`APPROVED`/`DENIED` with rule checks and Kill Switch state).
+6. **`memory_entries`**, **`memory_versions`**, **`learning_cycles`**, **`generated_regression_cases`**, & **`model_routing_log`**: Structured versioned memory, 10-step learning lifecycle (including `ROLLED_BACK`), regression guards, and multi-provider AI spend/rate-limit telemetry.
+7. **`users`**, **`sessions`**, **`security_audit_logs`**, & **`system_state`**: Stage 4A authentication, RBAC sessions, immutable security audit log, and `kill_switch_active`.
 
 ---
 
-## 4. Phase Roadmap & Current Gate
+## 4. Phase Roadmap & Current State
 
-- **Phase 0 (Complete):** Workspace, dependency, Polymarket Gamma/CLOB V2 API, and fee math audit.
-- **Phase 1 (Complete):** Fail-closed Risk Gate, Polymarket read-only ingestion, Tier 1 binary arbitrage scanner, DuckDB persistence, Command Center UI, and automated Pytest + TypeScript tests.
-- **Phase 2 (Active — Stages 2A–2D Complete):** Read-only Kalshi Trade API v2 integration, complement-symmetry YES/NO normalization, fail-closed cross-venue settlement matching, and deterministic Paper Execution Simulator (limit IOC orders, partial fills, latency/drift, second-leg failures, bid-book unwinds, and DuckDB paper blotter).
-- **Future Tiers (Gated & Inactive):** Tier 2 Crypto Delta-Neutral & Tier 3 AI Market Research (presently inactive; AI outputs may only reduce size or reject, never authorize trades).
+- **Phase 0–2 (Complete):** Fail-closed Risk Gate, Polymarket & Kalshi read-only scanners, settlement matcher, and deterministic Cross-Venue Paper Simulator.
+- **Stage 3A–4A (Active):** Supervisor 5-role workforce, Stocks & Crypto AI Councils with market drivers, Brier calibration, 10-step Learning Core (with continuous regression monitoring and rollback), Validation Labs, and full RBAC authentication.
+- **Unified Milestone (Active):** Integrated `backend/solana_desk/` (`SCOUT -> FILTER -> ANALYST -> EXECUTOR -> RISK -> LOGGER`), real read-only Solana adapters, DuckDB simulated ledger, and multi-provider free/open-weight AI ecosystem (`local_deterministic`, `ollama`, `groq`, `openrouter`, `huggingface`, `gemini`).
+- **Future Module (Gated & Inactive):** Tier 2 Crypto Delta-Neutral & Carry remains `INACTIVE` / `UNAVAILABLE` with zero live execution.

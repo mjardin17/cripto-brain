@@ -1,7 +1,11 @@
 import { useState } from 'react';
-import { Play, RotateCcw, Square, Zap } from 'lucide-react';
+import { Play, RotateCcw, Server, Square, Zap } from 'lucide-react';
 import { certaintyApi } from '../api/client';
-import type { IntelligenceCommandCenterPayload, UserPermissions } from '../types/certainty';
+import type {
+  IntelligenceCommandCenterPayload,
+  ModelProviderRegistry,
+  UserPermissions,
+} from '../types/certainty';
 import {
   computeBudgetUtilizationPct,
   formatProbPct,
@@ -9,6 +13,7 @@ import {
   formatTimestampShort,
   formatUsd,
   summarizeAgentTaskStatus,
+  summarizeProviderStatus,
 } from '../utils/formatters';
 import { ProvenanceLabel } from './ProvenanceLabel';
 import { CouncilPanel } from './CouncilPanel';
@@ -18,6 +23,7 @@ import { OperationsStage3EPanels } from './OperationsStage3EPanels';
 
 interface IntelligenceCenterViewProps {
   data: IntelligenceCommandCenterPayload | null;
+  providerRegistry?: ModelProviderRegistry | null;
   loading: boolean;
   permissions?: UserPermissions;
   onRefresh: () => Promise<void>;
@@ -33,6 +39,7 @@ const ROLE_DEFAULT_TASKS: Record<string, string> = {
 
 export function IntelligenceCenterView({
   data,
+  providerRegistry,
   loading,
   permissions,
   onRefresh,
@@ -1156,6 +1163,243 @@ export function IntelligenceCenterView({
                     </td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      {/* Section 7B & 8B: Multi-Provider Free/Open-Weight Registry + 10-Step Learning Core */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <section className="border border-slate-800 bg-[#111827] rounded-xl p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                <Server className="w-4 h-4 text-sky-400" />
+                7B. Multi-Provider Model Ecosystem (Free &amp; Open-Weight)
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Live capability registry with zero hardcoded keys. Unconfigured providers stay UNAVAILABLE; cooldowns trigger automatic fallback.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <ProvenanceLabel
+                provenance={(providerRegistry?.available_ai_providers.length ?? 0) > 0 ? 'LIVE' : 'UNAVAILABLE'}
+                detail={`${providerRegistry?.available_ai_providers.length ?? model_routing.available_ai_providers?.length ?? 0} AI Ready`}
+              />
+              <button
+                type="button"
+                disabled={busyAction !== null || !canRouteModels}
+                title={canRouteModels ? 'Probe live model providers' : 'Requires OPERATOR or OWNER role'}
+                onClick={() =>
+                  void runAction('probe-providers', async () => {
+                    const res = await certaintyApi.probeModelProviders();
+                    return `Probed ${res.providers.length} providers: ready=[${res.available_ai_providers.join(', ') || 'local_deterministic only'}].`;
+                  })
+                }
+                className="px-2.5 py-1.5 text-xs font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg"
+              >
+                Probe Live Providers
+              </button>
+            </div>
+          </div>
+
+          <div className="p-2.5 rounded-lg bg-[#0E1522] border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="text-slate-400">
+              Fallback Order:{' '}
+              <span className="font-mono text-slate-200">
+                {(providerRegistry?.fallback_order ?? model_routing.fallback_order ?? ['local_deterministic']).join(' → ')}
+              </span>
+            </span>
+            {canActivateConfigs && (providerRegistry?.fallback_order?.length ?? 0) > 1 ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() =>
+                  void runAction('rotate-fallback', async () => {
+                    const order = providerRegistry?.fallback_order ?? ['ollama', 'groq', 'openrouter', 'huggingface', 'gemini'];
+                    const rotated = [...order.slice(1), order[0]];
+                    const updated = await certaintyApi.updateProviderFallbackOrder(rotated);
+                    return `Updated provider fallback order -> ${updated.fallback_order.join(' → ')}.`;
+                  })
+                }
+                className="px-2 py-1 text-[11px] font-medium bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded"
+              >
+                Rotate Primary Fallback
+              </button>
+            ) : null}
+          </div>
+
+          <div className="overflow-x-auto max-h-64 overflow-y-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-slate-800 text-slate-400">
+                <tr>
+                  <th className="py-1.5 pr-2 font-medium">Provider / Kind</th>
+                  <th className="py-1.5 pr-2 font-medium">Status</th>
+                  <th className="py-1.5 pr-2 font-medium">Default Model / Caps</th>
+                  <th className="py-1.5 font-medium">Rate / Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/80">
+                {(providerRegistry?.providers ?? model_routing.providers ?? []).map((prov) => {
+                  const pst = summarizeProviderStatus(prov.status);
+                  return (
+                    <tr key={prov.provider_id}>
+                      <td className="py-2 pr-2">
+                        <div className="font-mono font-semibold text-slate-100">{prov.provider_id}</div>
+                        <div className="font-mono text-[11px] text-slate-500">
+                          {prov.kind} · Key:{prov.api_key_configured ? 'ENV' : 'NONE'}
+                        </div>
+                      </td>
+                      <td className={`py-2 pr-2 font-mono font-semibold whitespace-nowrap ${pst.toneClass}`}>
+                        {pst.label}
+                      </td>
+                      <td className="py-2 pr-2 max-w-[200px]">
+                        <div className="font-mono text-slate-200 truncate">{prov.default_model}</div>
+                        <div className="font-mono text-[11px] text-slate-500">
+                          ${prov.cost_per_1m_input_usd}/${prov.cost_per_1m_output_usd} per 1M · req {prov.requests_today}
+                        </div>
+                      </td>
+                      <td className="py-2 font-mono text-[11px]">
+                        {prov.status === 'RATE_LIMITED' && canRouteModels ? (
+                          <button
+                            type="button"
+                            disabled={busyAction !== null}
+                            onClick={() =>
+                              void runAction(`clear-cd-${prov.provider_id}`, async () => {
+                                await certaintyApi.clearProviderCooldown(prov.provider_id);
+                                return `Cleared cooldown for provider ${prov.provider_id}.`;
+                              })
+                            }
+                            className="px-2 py-0.5 bg-amber-800/70 hover:bg-amber-700 text-amber-100 rounded"
+                          >
+                            Clear Cooldown
+                          </button>
+                        ) : (
+                          <span className="text-slate-500">
+                            {prov.rpm_limit ? `${prov.rpm_limit} rpm` : 'Local'}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="border border-slate-800 bg-[#111827] rounded-xl p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-100">
+                8B. Learning Core Lifecycle &amp; Regression Rollback ({data.learning_cycles.length})
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                10-step observe → verify → promote → regression monitor lifecycle. Failing regression suites automatically roll back applied lessons.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <ProvenanceLabel
+                provenance="LIVE"
+                detail={`${data.regression_cases.length} Reg. Cases`}
+              />
+              <button
+                type="button"
+                disabled={busyAction !== null || !canRouteModels}
+                title={canRouteModels ? 'Scan applied lessons against regression suite' : 'Requires OPERATOR or OWNER role'}
+                onClick={() =>
+                  void runAction('monitor-reg', async () => {
+                    const res = await certaintyApi.monitorLearningRegressions();
+                    return res.rolled_back_cycle_ids.length > 0
+                      ? `Regression monitor rolled back ${res.rolled_back_cycle_ids.length} cycle(s): ${res.rolled_back_cycle_ids.join(', ')}.`
+                      : `Regression monitor clean: ${res.failing_cases_count} failing case(s), 0 rollbacks triggered.`;
+                  })
+                }
+                className="px-2.5 py-1.5 text-xs font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg"
+              >
+                Run Regression Monitor
+              </button>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto max-h-64 overflow-y-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-slate-800 text-slate-400">
+                <tr>
+                  <th className="py-1.5 pr-2 font-medium">Subject / Stage</th>
+                  <th className="py-1.5 pr-2 font-medium">Hypothesis</th>
+                  <th className="py-1.5 pr-2 font-medium">Outcome</th>
+                  <th className="py-1.5 font-medium">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/80">
+                {data.learning_cycles.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="py-4 text-slate-500">
+                      No learning cycles recorded yet.
+                    </td>
+                  </tr>
+                ) : (
+                  data.learning_cycles.slice(0, 10).map((cyc) => {
+                    const canRollback =
+                      canActivateConfigs &&
+                      (cyc.stage === 'APPLIED' || cyc.stage === 'VERIFIED_LESSON');
+                    return (
+                      <tr key={cyc.cycle_id}>
+                        <td className="py-2 pr-2">
+                          <div className="font-mono text-slate-100">{cyc.subject_key}</div>
+                          <div
+                            className={`font-mono text-[11px] font-semibold ${
+                              cyc.stage === 'ROLLED_BACK'
+                                ? 'text-rose-400'
+                                : cyc.stage === 'APPLIED' || cyc.stage === 'VERIFIED_LESSON'
+                                ? 'text-emerald-400'
+                                : 'text-sky-400'
+                            }`}
+                          >
+                            {cyc.stage}
+                          </div>
+                        </td>
+                        <td className="py-2 pr-2 text-slate-300 max-w-[210px] truncate">
+                          {cyc.hypothesis}
+                        </td>
+                        <td className="py-2 pr-2 font-mono text-[11px] text-slate-400 whitespace-nowrap">
+                          {cyc.outcome_matched === true
+                            ? 'MATCH'
+                            : cyc.outcome_matched === false
+                            ? 'MISMATCH'
+                            : 'OPEN'}
+                        </td>
+                        <td className="py-2">
+                          {canRollback ? (
+                            <button
+                              type="button"
+                              disabled={busyAction !== null}
+                              onClick={() =>
+                                void runAction(`rb-cyc-${cyc.cycle_id}`, async () => {
+                                  await certaintyApi.rollbackLearningCycle(
+                                    cyc.cycle_id,
+                                    'Manual OWNER rollback from Intelligence Command Center'
+                                  );
+                                  return `Rolled back learning cycle ${cyc.cycle_id} safely.`;
+                                })
+                              }
+                              className="px-2 py-0.5 text-[11px] font-medium bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded inline-flex items-center gap-1"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              Rollback
+                            </button>
+                          ) : (
+                            <span className="font-mono text-[11px] text-slate-500">
+                              {cyc.cycle_id}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>
