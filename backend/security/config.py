@@ -14,6 +14,9 @@ from fastapi import Request
 SESSION_COOKIE_NAME = "certainty_session"
 CSRF_COOKIE_NAME = "certainty_csrf"
 CSRF_HEADER_NAME = "X-CSRF-Token"
+ARENA_SERVICE_TOKEN_HEADER = "X-Arena-Service-Token"
+ARENA_SIGNATURE_HEADER = "X-Arena-Signature"
+ARENA_TIMESTAMP_HEADER = "X-Arena-Timestamp"
 
 _INSECURE_PLACEHOLDERS = (
     "changeme",
@@ -63,6 +66,8 @@ class SecuritySettings:
     max_failed_logins: int = 5
     lockout_minutes: int = 15
     bootstrap_token: str = ""
+    arena_service_token: str = ""
+    arena_hmac_secret: str = ""
     rate_limit_overrides: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @property
@@ -105,6 +110,8 @@ def load_security_settings(
 
     rate_limit_enabled = _parse_bool(env.get("CERTAINTY_RATE_LIMIT_ENABLED"), default=True)
     bootstrap_token = env.get("CERTAINTY_BOOTSTRAP_TOKEN", "").strip()
+    arena_service_token = env.get("CERTAINTY_ARENA_SERVICE_TOKEN", "").strip()
+    arena_hmac_secret = env.get("CERTAINTY_ARENA_HMAC_SECRET", "").strip()
     require_tls = _parse_bool(env.get("CERTAINTY_REQUIRE_TLS"), default=True)
 
     return SecuritySettings(
@@ -120,6 +127,8 @@ def load_security_settings(
         max_failed_logins=max(3, int(env.get("CERTAINTY_MAX_FAILED_LOGINS", "5"))),
         lockout_minutes=max(1, int(env.get("CERTAINTY_LOCKOUT_MINUTES", "15"))),
         bootstrap_token=bootstrap_token,
+        arena_service_token=arena_service_token,
+        arena_hmac_secret=arena_hmac_secret,
     )
 
 

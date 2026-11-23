@@ -23,6 +23,10 @@ from backend.arbitrage.pair_review import (
     prioritize_pairs_for_scan,
 )
 from backend.arbitrage.scanner import PolymarketArbitrageScanner
+from backend.execution.blotter_resolution import (
+    BlotterResolutionError,
+    PaperBlotterResolutionService,
+)
 from backend.execution.paper_simulator import PaperExecutionEngine, PaperExecutionRequest
 from backend.future.modules import get_module_registry
 from backend.intelligence.councils import AICouncilEngine, CouncilType
@@ -66,6 +70,9 @@ from backend.security import (
     validate_security_settings,
 )
 from backend.security.config import (
+    ARENA_SERVICE_TOKEN_HEADER,
+    ARENA_SIGNATURE_HEADER,
+    ARENA_TIMESTAMP_HEADER,
     SESSION_COOKIE_NAME,
     resolve_client_ip,
     resolve_cookie_attributes,
@@ -75,6 +82,7 @@ from backend.security.dependencies import (
     enforce_rate_limit_check,
     enforce_tls_and_origin,
     extract_session_token,
+    make_arena_ingest_guard,
     make_guard,
     optional_authenticated_user,
     set_auth_cookies,
@@ -83,6 +91,10 @@ from backend.solana_desk.engine import PersistentSolanaDesk
 from backend.storage.duckdb_store import DuckDBStore, utc_now_iso
 from backend.venues.kalshi import KalshiReadOnlyClient
 from backend.venues.polymarket import PolymarketReadOnlyClient
+from backend.venues.settlement_verifier import (
+    SettlementQueueError,
+    SettlementVerificationService,
+)
 
 
 def sanitize_error_message(raw: Any) -> str:
@@ -97,6 +109,8 @@ def sanitize_error_message(raw: Any) -> str:
         "WALLET_PRIVATE_KEY",
         "CERTAINTY_SESSION_SECRET",
         "CERTAINTY_BOOTSTRAP_TOKEN",
+        "CERTAINTY_ARENA_SERVICE_TOKEN",
+        "CERTAINTY_ARENA_HMAC_SECRET",
     ):
         secret = os.environ.get(env_name, "").strip()
         if len(secret) >= 6:
@@ -231,8 +245,10 @@ class CrossVenueDiscoverRequest(BaseModel):
 class PaperBlotterResolveRequest(BaseModel):
     resolution_result: Literal["YES", "NO", "VOID"]
     notes: str = Field(default="", max_length=600)
+    resolution_source: str = Field(default="", max_length=160)
     linked_prediction_id: str | None = Field(default=None, max_length=64)
     arena_model_id: str | None = Field(default=None, max_length=120)
+    expected_timeframe: str | None = Field(default=None, max_length=80)
 
 
 class CrossVenuePairRejectRequest(BaseModel):
@@ -334,6 +350,74 @@ class PredictionResolveRequest(BaseModel):
     outcome: int | str
     resolution_source: str = Field(default="confirmed_settlement", min_length=2, max_length=120)
     reviewer_id: str = Field(default="calibration_auditor", min_length=2, max_length=64)
+
+
+class DatasetSnapshotRegisterRequest(BaseModel):
+    dataset_snapshot_id: str = Field(min_length=2, max_length=128)
+    dataset_version: str = Field(min_length=1, max_length=80)
+    snapshot_hash: str = Field(min_length=16, max_length=140)
+    split: Literal["TRAIN", "VALIDATION", "TEST"]
+    window_start: str = Field(min_length=10, max_length=64)
+    window_end: str = Field(min_length=10, max_length=64)
+    market_scope: str = Field(default="prediction_market_binary", min_length=2, max_length=64)
+    description: str = Field(default="", max_length=400)
+
+
+class ArenaForecastIngestRequest(BaseModel):
+    model_id: str = Field(min_length=1, max_length=120)
+    provider: str = Field(min_length=1, max_length=64)
+    task_category: str = Field(min_length=1, max_length=64)
+    prompt_version: str = Field(min_length=1, max_length=80)
+    benchmark_version: str = Field(min_length=1, max_length=80)
+    market_id: str = Field(min_length=1, max_length=128)
+    venue: str = Field(default="polymarket", min_length=2, max_length=32)
+    timeframe: str = Field(min_length=1, max_length=80)
+    forecast_timestamp: str = Field(min_length=10, max_length=64)
+    dataset_snapshot_id: str = Field(min_length=1, max_length=128)
+    dataset_version: str | None = Field(default=None, max_length=80)
+    snapshot_hash: str | None = Field(default=None, max_length=140)
+    dataset_split: Literal["TRAIN", "VALIDATION", "TEST"] | None = None
+    arena_routing_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    benchmark_run_id: str | None = Field(default=None, max_length=120)
+    require_registered_snapshot: bool = False
+    enforce_freshness: bool = False
+    max_snapshot_lag_hours: float = Field(default=168.0, gt=0.0, le=8760.0)
+    max_live_forecast_age_hours: float = Field(default=72.0, gt=0.0, le=8760.0)
+    predicted_prob: float = Field(ge=0.0, le=1.0)
+    predicted_direction: Literal["YES", "NO", "UP", "DOWN"]
+    subject_key: str | None = Field(default=None, max_length=120)
+    question: str = Field(default="", max_length=400)
+    market_implied_prob: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence: float = Field(default=0.70, ge=0.0, le=1.0)
+    rationale: str = Field(default="", max_length=1000)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    provenance: str = Field(default="LIVE", max_length=24)
+    external_forecast_id: str | None = Field(default=None, max_length=128)
+
+
+class ArenaForecastBatchRequest(BaseModel):
+    forecasts: list[ArenaForecastIngestRequest] = Field(min_length=1, max_length=100)
+    require_registered_snapshot: bool = False
+    enforce_freshness: bool = False
+    max_snapshot_lag_hours: float = Field(default=168.0, gt=0.0, le=8760.0)
+    max_live_forecast_age_hours: float = Field(default=72.0, gt=0.0, le=8760.0)
+
+
+class SettlementFetchRequest(BaseModel):
+    venue: Literal["polymarket", "kalshi"]
+    market_id: str = Field(min_length=1, max_length=128)
+    linked_prediction_id: str | None = Field(default=None, max_length=80)
+    linked_ledger_id: str | None = Field(default=None, max_length=80)
+    secondary_venue: Literal["polymarket", "kalshi"] | None = None
+    secondary_market_id: str | None = Field(default=None, max_length=128)
+
+
+class SettlementReviewRequest(BaseModel):
+    action: Literal["APPROVE", "REJECT", "MARK_DISPUTED"]
+    operator_confirmed: bool = False
+    notes: str = Field(default="", max_length=600)
+    linked_prediction_id: str | None = Field(default=None, max_length=80)
+    linked_ledger_id: str | None = Field(default=None, max_length=80)
 
 
 class ModelRouteRequest(BaseModel):
@@ -458,6 +542,8 @@ class SolanaPaperMarkRequest(BaseModel):
 
 class FallbackOrderUpdateRequest(BaseModel):
     fallback_order: list[str] = Field(min_length=1, max_length=10)
+    source_dataset_split: Literal["TRAIN", "VALIDATION", "TEST"] | None = None
+    source_snapshot_id: str | None = Field(default=None, max_length=128)
 
 
 class LearningRollbackRequest(BaseModel):
@@ -489,6 +575,18 @@ def create_app(
     memory_manager = StructuredMemoryManager(store=store)
     learning_engine = LearningEngine(store=store, memory_manager=memory_manager)
     prob_engine = ProbabilityIntelligenceEngine(store=store, learning=learning_engine)
+    blotter_resolution_service = PaperBlotterResolutionService(
+        store=store,
+        learning_engine=learning_engine,
+        prob_engine=prob_engine,
+    )
+    settlement_verifier = SettlementVerificationService(
+        store=store,
+        poly_client=poly_client,
+        kalshi_client=kalshi_client,
+        prob_engine=prob_engine,
+        blotter_resolution_service=blotter_resolution_service,
+    )
     config_manager = ConfigGovernanceManager(store=store, learning=learning_engine)
     model_router = CostAwareModelRouter(store=store)
     solana_desk = PersistentSolanaDesk(
@@ -566,7 +664,16 @@ def create_app(
         allow_origins=list(sec_settings.allowed_origins),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Accept", CSRF_HEADER_NAME, "Authorization"],
+        allow_headers=[
+            "Content-Type",
+            "Accept",
+            CSRF_HEADER_NAME,
+            "Authorization",
+            ARENA_SERVICE_TOKEN_HEADER,
+            ARENA_SIGNATURE_HEADER,
+            ARENA_TIMESTAMP_HEADER,
+            "X-Idempotency-Key",
+        ],
     )
 
     @app.middleware("http")
@@ -592,6 +699,8 @@ def create_app(
     app.state.memory_manager = memory_manager
     app.state.learning_engine = learning_engine
     app.state.prob_engine = prob_engine
+    app.state.blotter_resolution_service = blotter_resolution_service
+    app.state.settlement_verifier = settlement_verifier
     app.state.config_manager = config_manager
     app.state.model_router = model_router
     app.state.supervisor = supervisor
@@ -614,6 +723,7 @@ def create_app(
     # Deny-by-default RBAC route guards
     read_only_guard = make_guard("READ_ONLY")
     analyst_guard = make_guard("ANALYST")
+    arena_ingest_guard = make_arena_ingest_guard(min_role="ANALYST")
     operator_guard = make_guard("OPERATOR")
     operator_dispatch_guard = make_guard("OPERATOR", rate_limit_class="AGENT_DISPATCH")
     operator_paper_guard = make_guard("OPERATOR", rate_limit_class="PAPER_EXECUTE")
@@ -1590,6 +1700,339 @@ def create_app(
             code = 404 if "Unknown prediction_id" in msg else 400
             raise HTTPException(status_code=code, detail=msg) from exc
 
+    @app.get("/api/intelligence/datasets/snapshots")
+    async def list_dataset_snapshots(
+        dataset_version: str | None = Query(default=None, max_length=80),
+        split: str | None = Query(default=None, max_length=24),
+        market_scope: str | None = Query(default=None, max_length=64),
+        limit: int = Query(default=100, ge=1, le=300),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        snapshots = prob_engine.list_dataset_snapshots(
+            dataset_version=dataset_version,
+            split=split,
+            market_scope=market_scope,
+            limit=limit,
+        )
+        return {
+            "provenance": "LIVE",
+            "live_trading_enabled": False,
+            "count": len(snapshots),
+            "snapshots": snapshots,
+        }
+
+    @app.post("/api/intelligence/datasets/snapshots")
+    async def register_dataset_snapshot(
+        req: DatasetSnapshotRegisterRequest,
+        request: Request,
+        user: AuthenticatedUser = Depends(arena_ingest_guard),
+    ) -> dict[str, Any]:
+        try:
+            snap = prob_engine.register_dataset_snapshot(
+                dataset_snapshot_id=req.dataset_snapshot_id,
+                dataset_version=req.dataset_version,
+                snapshot_hash=req.snapshot_hash,
+                split=req.split,
+                window_start=req.window_start,
+                window_end=req.window_end,
+                market_scope=req.market_scope,
+                description=req.description,
+                created_by=user.username,
+            )
+        except ValueError as exc:
+            msg = sanitize_error_message(exc)
+            code = 409 if ("Overlapping" in msg or "already exists" in msg or "chronological" in msg) else 400
+            raise HTTPException(status_code=code, detail=msg) from exc
+
+        auth_manager.record_audit_event(
+            event_type="DATASET_SNAPSHOT_REGISTERED",
+            outcome="SUCCESS",
+            ip_address=resolve_client_ip(request, sec_settings),
+            endpoint="/api/intelligence/datasets/snapshots",
+            method="POST",
+            user_id=user.user_id,
+            username=user.username,
+            role=user.role,
+            detail={
+                "dataset_snapshot_id": snap["dataset_snapshot_id"],
+                "dataset_version": snap["dataset_version"],
+                "split": snap["split"],
+                "deduplicated": bool(snap.get("deduplicated")),
+            },
+        )
+        return {
+            "provenance": "LIVE",
+            "live_trading_enabled": False,
+            "deduplicated": bool(snap.get("deduplicated")),
+            "snapshot": snap,
+        }
+
+    @app.get("/api/intelligence/arena/forecasts")
+    async def list_arena_forecasts(
+        model_id: str | None = Query(default=None, max_length=120),
+        provider: str | None = Query(default=None, max_length=64),
+        task_category: str | None = Query(default=None, max_length=64),
+        benchmark_version: str | None = Query(default=None, max_length=80),
+        dataset_split: str | None = Query(default=None, max_length=24),
+        dataset_snapshot_id: str | None = Query(default=None, max_length=128),
+        status: str | None = Query(default=None, max_length=24),
+        market_id: str | None = Query(default=None, max_length=128),
+        min_resolved_samples: int = Query(default=10, ge=1, le=500),
+        limit: int = Query(default=100, ge=1, le=300),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        forecasts = prob_engine.list_arena_forecasts(
+            model_id=model_id,
+            provider=provider,
+            task_category=task_category,
+            benchmark_version=benchmark_version,
+            dataset_split=dataset_split,
+            dataset_snapshot_id=dataset_snapshot_id,
+            status=status,
+            market_id=market_id,
+            limit=limit,
+        )
+        leaderboard = prob_engine.get_arena_model_leaderboard(
+            task_category=task_category,
+            benchmark_version=benchmark_version,
+            dataset_split=dataset_split,
+            dataset_snapshot_id=dataset_snapshot_id,
+            min_resolved_samples=min_resolved_samples,
+        )
+        return {
+            "provenance": "LIVE",
+            "live_trading_enabled": False,
+            "count": len(forecasts),
+            "forecasts": forecasts,
+            "leaderboard": leaderboard,
+        }
+
+    @app.get("/api/intelligence/arena/evaluation")
+    async def arena_evaluation_report(
+        task_category: str | None = Query(default=None, max_length=64),
+        benchmark_version: str | None = Query(default=None, max_length=80),
+        dataset_split: str | None = Query(default=None, max_length=24),
+        dataset_snapshot_id: str | None = Query(default=None, max_length=128),
+        timeframe: str | None = Query(default=None, max_length=80),
+        min_resolved_samples: int = Query(default=10, ge=1, le=500),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        return prob_engine.get_arena_evaluation_report(
+            task_category=task_category,
+            benchmark_version=benchmark_version,
+            dataset_split=dataset_split,
+            dataset_snapshot_id=dataset_snapshot_id,
+            timeframe=timeframe,
+            min_resolved_samples=min_resolved_samples,
+        )
+
+    @app.post("/api/intelligence/arena/forecasts")
+    async def ingest_arena_forecast(
+        req: ArenaForecastIngestRequest,
+        request: Request,
+        user: AuthenticatedUser = Depends(arena_ingest_guard),
+    ) -> dict[str, Any]:
+        try:
+            ingested = prob_engine.ingest_arena_forecast(
+                model_id=req.model_id,
+                provider=req.provider,
+                task_category=req.task_category,
+                prompt_version=req.prompt_version,
+                benchmark_version=req.benchmark_version,
+                market_id=req.market_id,
+                venue=req.venue,
+                timeframe=req.timeframe,
+                forecast_timestamp=req.forecast_timestamp,
+                dataset_snapshot_id=req.dataset_snapshot_id,
+                dataset_version=req.dataset_version,
+                snapshot_hash=req.snapshot_hash,
+                dataset_split=req.dataset_split,
+                arena_routing_score=req.arena_routing_score,
+                benchmark_run_id=req.benchmark_run_id,
+                require_registered_snapshot=req.require_registered_snapshot,
+                enforce_freshness=req.enforce_freshness,
+                max_snapshot_lag_hours=req.max_snapshot_lag_hours,
+                max_live_forecast_age_hours=req.max_live_forecast_age_hours,
+                predicted_prob=req.predicted_prob,
+                predicted_direction=req.predicted_direction,
+                subject_key=req.subject_key,
+                question=req.question,
+                market_implied_prob=req.market_implied_prob,
+                confidence=req.confidence,
+                rationale=req.rationale,
+                evidence=req.evidence,
+                provenance=req.provenance,
+                external_forecast_id=req.external_forecast_id,
+                ingested_by=user.username,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
+
+        auth_manager.record_audit_event(
+            event_type="ARENA_FORECAST_INGESTED",
+            outcome="SUCCESS",
+            ip_address=resolve_client_ip(request, sec_settings),
+            endpoint="/api/intelligence/arena/forecasts",
+            method="POST",
+            user_id=user.user_id,
+            username=user.username,
+            role=user.role,
+            detail={
+                "prediction_id": ingested["prediction_id"],
+                "agent_id": ingested["agent_id"],
+                "provider": ingested.get("provider"),
+                "model_id": ingested.get("model_id"),
+                "task_category": ingested.get("task_category"),
+                "benchmark_version": ingested.get("benchmark_version"),
+                "dataset_split": ingested.get("dataset_split"),
+                "market_id": ingested["market_id"],
+                "deduplicated": bool(ingested.get("deduplicated")),
+            },
+        )
+        return {
+            "provenance": ingested["provenance"],
+            "live_trading_enabled": False,
+            "deduplicated": bool(ingested.get("deduplicated")),
+            "forecast": ingested,
+        }
+
+    @app.post("/api/intelligence/arena/forecasts/batch")
+    async def ingest_arena_forecasts_batch(
+        req: ArenaForecastBatchRequest,
+        request: Request,
+        user: AuthenticatedUser = Depends(arena_ingest_guard),
+    ) -> dict[str, Any]:
+        try:
+            batch_res = prob_engine.ingest_arena_forecasts_batch(
+                [item.model_dump() for item in req.forecasts],
+                ingested_by=user.username,
+                require_registered_snapshot=req.require_registered_snapshot,
+                enforce_freshness=req.enforce_freshness,
+                max_snapshot_lag_hours=req.max_snapshot_lag_hours,
+                max_live_forecast_age_hours=req.max_live_forecast_age_hours,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
+
+        auth_manager.record_audit_event(
+            event_type="ARENA_FORECAST_BATCH_INGESTED",
+            outcome="SUCCESS",
+            ip_address=resolve_client_ip(request, sec_settings),
+            endpoint="/api/intelligence/arena/forecasts/batch",
+            method="POST",
+            user_id=user.user_id,
+            username=user.username,
+            role=user.role,
+            detail={
+                "count": batch_res["count"],
+                "inserted_count": batch_res["inserted_count"],
+                "deduplicated_count": batch_res["deduplicated_count"],
+            },
+        )
+        return {
+            "provenance": "LIVE",
+            "live_trading_enabled": False,
+            **batch_res,
+        }
+
+    @app.get("/api/settlement/queue")
+    async def list_settlement_queue(
+        verification_status: str | None = Query(default=None, max_length=40),
+        venue: str | None = Query(default=None, max_length=24),
+        limit: int = Query(default=100, ge=1, le=300),
+        _: AuthenticatedUser = Depends(read_only_guard),
+    ) -> dict[str, Any]:
+        return settlement_verifier.list_queue(
+            verification_status=verification_status,
+            venue=venue,
+            limit=limit,
+        )
+
+    @app.post("/api/settlement/queue/fetch")
+    async def fetch_official_settlement(
+        req: SettlementFetchRequest,
+        request: Request,
+        user: AuthenticatedUser = Depends(analyst_guard),
+    ) -> dict[str, Any]:
+        try:
+            queued = await settlement_verifier.fetch_and_enqueue(
+                venue=req.venue,
+                market_id=req.market_id,
+                fetched_by=user.username,
+                linked_prediction_id=req.linked_prediction_id,
+                linked_ledger_id=req.linked_ledger_id,
+                secondary_venue=req.secondary_venue,
+                secondary_market_id=req.secondary_market_id,
+            )
+        except SettlementQueueError as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail=sanitize_error_message(exc.detail)
+            ) from exc
+
+        auth_manager.record_audit_event(
+            event_type="OFFICIAL_SETTLEMENT_QUEUED",
+            outcome="SUCCESS",
+            ip_address=resolve_client_ip(request, sec_settings),
+            endpoint="/api/settlement/queue/fetch",
+            method="POST",
+            user_id=user.user_id,
+            username=user.username,
+            role=user.role,
+            detail={
+                "queue_id": queued["queue_id"],
+                "venue": queued["venue"],
+                "market_id": queued["market_id"],
+                "verification_status": queued["verification_status"],
+                "proposed_outcome": queued["proposed_outcome"],
+            },
+        )
+        return {
+            "provenance": "LIVE",
+            "live_trading_enabled": False,
+            "auto_finalized": False,
+            "queue_item": queued,
+        }
+
+    @app.post("/api/settlement/queue/{queue_id}/review")
+    async def review_settlement_queue_item(
+        queue_id: str,
+        req: SettlementReviewRequest,
+        request: Request,
+        user: AuthenticatedUser = Depends(operator_paper_guard),
+    ) -> dict[str, Any]:
+        try:
+            result = settlement_verifier.review_queue_item(
+                queue_id=queue_id,
+                action=req.action,
+                operator_username=user.username,
+                operator_confirmed=req.operator_confirmed,
+                notes=req.notes,
+                linked_prediction_id=req.linked_prediction_id,
+                linked_ledger_id=req.linked_ledger_id,
+            )
+        except SettlementQueueError as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail=sanitize_error_message(exc.detail)
+            ) from exc
+
+        auth_manager.record_audit_event(
+            event_type="SETTLEMENT_QUEUE_REVIEWED",
+            outcome="SUCCESS",
+            ip_address=resolve_client_ip(request, sec_settings),
+            endpoint=request.url.path,
+            method="POST",
+            user_id=user.user_id,
+            username=user.username,
+            role=user.role,
+            detail={
+                "queue_id": queue_id,
+                "action": req.action,
+                "verification_status": result["queue_item"]["verification_status"],
+                "resolution_cycle_id": result["queue_item"].get("resolution_cycle_id"),
+            },
+        )
+        return result
+
     @app.get("/api/intelligence/calibration")
     async def calibration_summary(
         agent_id: str | None = Query(default=None),
@@ -1649,7 +2092,12 @@ def create_app(
         owner: AuthenticatedUser = Depends(owner_config_guard),
     ) -> dict[str, Any]:
         try:
-            res = model_router.update_fallback_order(req.fallback_order, actor=owner.username)
+            res = model_router.update_fallback_order(
+                req.fallback_order,
+                actor=owner.username,
+                source_dataset_split=req.source_dataset_split,
+                source_snapshot_id=req.source_snapshot_id,
+            )
             auth_manager.record_audit_event(
                 event_type="PROVIDER_FALLBACK_ORDER_UPDATED",
                 outcome="SUCCESS",
@@ -1662,6 +2110,8 @@ def create_app(
                 detail={"fallback_order": res["fallback_order"]},
             )
             return res
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=sanitize_error_message(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
 
@@ -2596,195 +3046,43 @@ def create_app(
         request: Request,
         user: AuthenticatedUser = Depends(operator_paper_guard),
     ) -> dict[str, Any]:
-        clean_ledger_id = ledger_id.strip()
-        if not clean_ledger_id or len(clean_ledger_id) > 80:
-            raise HTTPException(status_code=400, detail="Invalid paper blotter ledger_id.")
-
-        entry = store.get_paper_pnl_entry(clean_ledger_id)
-        if not entry:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Unknown paper blotter ledger_id '{clean_ledger_id}'.",
+        try:
+            result = blotter_resolution_service.resolve_entry(
+                ledger_id=ledger_id,
+                resolution_result=req.resolution_result,
+                operator_username=user.username,
+                notes=req.notes,
+                resolution_source=req.resolution_source,
+                linked_prediction_id=req.linked_prediction_id,
+                arena_model_id=req.arena_model_id,
+                expected_timeframe=req.expected_timeframe,
             )
-        if entry["resolution_result"] != "PENDING":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Paper blotter entry '{clean_ledger_id}' is already confirmed as "
-                    f"'{entry['resolution_result']}'."
-                ),
-            )
+        except BlotterResolutionError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=sanitize_error_message(exc)) from exc
 
-        linked_pred_id = (req.linked_prediction_id or "").strip() or None
-        arena_model_id = (req.arena_model_id or "").strip() or None
-        notes_clean = req.notes.strip()
-
-        if linked_pred_id:
-            existing_pred = prob_engine.get_prediction(linked_pred_id)
-            if not existing_pred:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Unknown linked_prediction_id '{linked_pred_id}'.",
-                )
-            if existing_pred["status"] != "OPEN":
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"Linked prediction '{linked_pred_id}' is already finalized "
-                        f"with status '{existing_pred['status']}'."
-                    ),
-                )
-
-        resolved_prediction: dict[str, Any] | None = None
-        if linked_pred_id:
-            mapped_outcome: int | str = (
-                1 if req.resolution_result == "YES" else (0 if req.resolution_result == "NO" else "VOID")
-            )
-            resolved_prediction = prob_engine.resolve_prediction(
-                linked_pred_id,
-                outcome=mapped_outcome,
-                resolution_source=f"paper_blotter:{clean_ledger_id}",
-                reviewer_id=user.username,
-            )
-
-        agent_id = (
-            arena_model_id
-            or (resolved_prediction["agent_id"] if resolved_prediction else None)
-            or "paper_execution_desk"
-        )
-        subject_key = f"paper_blotter:{entry['pair_id'].lower()}"
-        expected_outcome: dict[str, Any] = {
-            "execution_id": entry["execution_id"],
-            "pair_id": entry["pair_id"],
-            "outcome_status": entry["outcome_status"],
-            "matched_shares": entry["matched_shares"],
-            "unwound_shares": entry["unwound_shares"],
-            "locked_arb_edge_usd": entry["locked_arb_edge_usd"],
-            "simulated_realized_pnl_usd": entry["realized_pnl_usd"],
-        }
-        if arena_model_id:
-            expected_outcome["arena_model_id"] = arena_model_id
-        if resolved_prediction:
-            expected_outcome["linked_prediction_id"] = linked_pred_id
-            expected_outcome["predicted_prob"] = resolved_prediction["predicted_prob"]
-
-        if req.resolution_result == "VOID":
-            outcome_matched = False
-        elif resolved_prediction and resolved_prediction.get("actual_outcome") in (0, 1):
-            y_val = int(resolved_prediction["actual_outcome"])
-            pred_p = float(resolved_prediction["predicted_prob"])
-            outcome_matched = (pred_p >= 0.5 and y_val == 1) or (pred_p < 0.5 and y_val == 0)
-        else:
-            outcome_matched = (
-                entry["outcome_status"] in ("HEDGED_FULL_FILL", "HEDGED_PARTIAL_LEG1")
-                and float(entry["locked_arb_edge_usd"]) >= 0.0
-                and float(entry["realized_pnl_usd"]) >= 0.0
-            )
-
-        evidence_item: dict[str, Any] = {
-            "source_type": "PAPER_BLOTTER_RESOLUTION",
-            "source_ref_id": clean_ledger_id,
-            "execution_id": entry["execution_id"],
-            "pair_id": entry["pair_id"],
-            "resolution_result": req.resolution_result,
-            "confirmed_by": user.username,
-            "notes": notes_clean,
-        }
-        if arena_model_id:
-            evidence_item["arena_model_id"] = arena_model_id
-        if linked_pred_id:
-            evidence_item["linked_prediction_id"] = linked_pred_id
-        if resolved_prediction and resolved_prediction.get("brier_score") is not None:
-            evidence_item["brier_score"] = resolved_prediction["brier_score"]
-
-        cycle = learning_engine.record_observation(
-            source_type="PAPER_BLOTTER_RESOLUTION",
-            source_ref_id=clean_ledger_id,
-            agent_id=agent_id,
-            subject_key=subject_key,
-            hypothesis=(
-                f"Paper execution {entry['execution_id']} on {entry['pair_id']} "
-                f"({entry['outcome_status']}) confirmed against actual market outcome {req.resolution_result}."
-            ),
-            expected_outcome=expected_outcome,
-            evidence=[evidence_item],
-        )
-        cycle = learning_engine.record_evaluation(
-            cycle["cycle_id"],
-            evaluation_notes=(
-                f"Operator {user.username} manually confirmed market outcome={req.resolution_result}"
-                + (f" for Arena model {arena_model_id}" if arena_model_id else "")
-                + (f" linked to forecast {linked_pred_id}" if linked_pred_id else "")
-                + "."
-            ),
-            evidence=[evidence_item],
-        )
-        cycle = learning_engine.record_decision(
-            cycle["cycle_id"],
-            decision_summary=(
-                f"Record verified outcome {req.resolution_result} for ledger {clean_ledger_id} "
-                "into Learning Core without altering Risk Gate policy."
-            ),
-        )
-        actual_outcome_payload: dict[str, Any] = {
-            "resolution_result": req.resolution_result,
-            "confirmed_by": user.username,
-            "notes": notes_clean,
-            "arena_model_id": arena_model_id,
-            "linked_prediction_id": linked_pred_id,
-        }
-        if resolved_prediction:
-            actual_outcome_payload["prediction_status"] = resolved_prediction["status"]
-            actual_outcome_payload["brier_score"] = resolved_prediction.get("brier_score")
-            actual_outcome_payload["log_loss"] = resolved_prediction.get("log_loss")
-
-        cycle = learning_engine.record_outcome(
-            cycle["cycle_id"],
-            actual_outcome=actual_outcome_payload,
-            outcome_matched=outcome_matched,
-            evidence=[evidence_item],
-        )
-
-        resolved_at = utc_now_iso()
-        updated_entry = store.resolve_paper_pnl_entry(
-            clean_ledger_id,
-            resolution_result=req.resolution_result,
-            resolution_notes=notes_clean,
-            resolved_by=user.username,
-            resolved_at=resolved_at,
-            learning_cycle_id=cycle["cycle_id"],
-            linked_prediction_id=linked_pred_id,
-            arena_model_id=arena_model_id,
-        )
-
+        updated_entry = result["entry"]
         auth_manager.record_audit_event(
             event_type="PAPER_BLOTTER_OUTCOME_CONFIRMED",
             outcome="SUCCESS",
             ip_address=resolve_client_ip(request, sec_settings),
-            endpoint=f"/api/paper/blotter/{clean_ledger_id}/resolve",
+            endpoint=f"/api/paper/blotter/{updated_entry['ledger_id']}/resolve",
             method="POST",
             user_id=user.user_id,
             username=user.username,
             role=user.role,
             detail={
-                "ledger_id": clean_ledger_id,
-                "pair_id": entry["pair_id"],
-                "resolution_result": req.resolution_result,
-                "learning_cycle_id": cycle["cycle_id"],
-                "linked_prediction_id": linked_pred_id,
-                "arena_model_id": arena_model_id,
+                "ledger_id": updated_entry["ledger_id"],
+                "pair_id": updated_entry["pair_id"],
+                "resolution_result": updated_entry["resolution_result"],
+                "resolution_source": updated_entry.get("resolution_source"),
+                "learning_cycle_id": result["learning_cycle_id"],
+                "linked_prediction_id": updated_entry.get("linked_prediction_id"),
+                "arena_model_id": updated_entry.get("arena_model_id"),
             },
         )
-
-        return {
-            "provenance": "SIMULATED",
-            "live_trading_enabled": False,
-            "entry": updated_entry,
-            "summary": store.get_paper_summary(),
-            "learning_cycle": cycle,
-            "learning_cycle_id": cycle["cycle_id"],
-            "resolved_prediction": resolved_prediction,
-        }
+        return result
 
     # ------------------------------------------------------------------
     # Solana Memecoin Research & Simulated Paper Desk Routes

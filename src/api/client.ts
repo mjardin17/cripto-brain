@@ -3,6 +3,9 @@ import type {
   AdversarialReviewRecord,
   AgentMemoryEntry,
   AgentTaskRecord,
+  ArenaEvaluationReport,
+  ArenaForecastIngestPayload,
+  ArenaForecastListResponse,
   AuthStatusResponse,
   AuthenticatedUserRecord,
   ConcurrencyStressRunRecord,
@@ -11,6 +14,8 @@ import type {
   CrossVenuePairRecord,
   CrossVenuePairRegisterResponse,
   CrossVenueScanResponse,
+  DatasetSnapshotRecord,
+  DatasetSplit,
   DriverLearningWeightRecord,
   PairDiscoveryResponse,
   PairReviewResponse,
@@ -50,6 +55,9 @@ import type {
   ScanResponse,
   SecurityAuditLogRecord,
   SessionRecord,
+  SettlementQueueItem,
+  SettlementQueueResponse,
+  SettlementReviewResponse,
   SoakMode,
   SoakRunRecord,
   SolanaDiscoverResponse,
@@ -384,8 +392,10 @@ export const certaintyApi = {
     payload: {
       resolution_result: 'YES' | 'NO' | 'VOID';
       notes?: string;
+      resolution_source?: string;
       linked_prediction_id?: string | null;
       arena_model_id?: string | null;
+      expected_timeframe?: string | null;
     }
   ) =>
     apiFetch<PaperBlotterResolveResponse>(
@@ -465,6 +475,157 @@ export const certaintyApi = {
   ) =>
     apiFetch<PredictionRecord>(
       `/api/intelligence/predictions/${encodeURIComponent(predictionId)}/resolve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  getArenaForecasts: (params?: {
+    model_id?: string;
+    provider?: string;
+    task_category?: string;
+    benchmark_version?: string;
+    status?: string;
+    market_id?: string;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.model_id) qs.set('model_id', params.model_id);
+    if (params?.provider) qs.set('provider', params.provider);
+    if (params?.task_category) qs.set('task_category', params.task_category);
+    if (params?.benchmark_version) qs.set('benchmark_version', params.benchmark_version);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.market_id) qs.set('market_id', params.market_id);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<ArenaForecastListResponse>(`/api/intelligence/arena/forecasts${suffix}`);
+  },
+
+  ingestArenaForecast: (payload: ArenaForecastIngestPayload) =>
+    apiFetch<{
+      provenance: string;
+      live_trading_enabled: boolean;
+      deduplicated: boolean;
+      forecast: PredictionRecord;
+    }>('/api/intelligence/arena/forecasts', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  ingestArenaForecastsBatch: (forecasts: ArenaForecastIngestPayload[]) =>
+    apiFetch<{
+      provenance: string;
+      live_trading_enabled: boolean;
+      count: number;
+      inserted_count: number;
+      deduplicated_count: number;
+      forecasts: PredictionRecord[];
+    }>('/api/intelligence/arena/forecasts/batch', {
+      method: 'POST',
+      body: JSON.stringify({ forecasts }),
+    }),
+
+  getDatasetSnapshots: (params?: {
+    dataset_version?: string;
+    split?: DatasetSplit;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.dataset_version) qs.set('dataset_version', params.dataset_version);
+    if (params?.split) qs.set('split', params.split);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<{
+      provenance: string;
+      live_trading_enabled: boolean;
+      count: number;
+      snapshots: DatasetSnapshotRecord[];
+    }>(`/api/intelligence/datasets/snapshots${suffix}`);
+  },
+
+  registerDatasetSnapshot: (payload: {
+    dataset_snapshot_id: string;
+    dataset_version: string;
+    snapshot_hash: string;
+    split: DatasetSplit;
+    window_start: string;
+    window_end: string;
+    market_scope?: string;
+    description?: string;
+  }) =>
+    apiFetch<{
+      provenance: string;
+      live_trading_enabled: boolean;
+      deduplicated: boolean;
+      snapshot: DatasetSnapshotRecord;
+    }>('/api/intelligence/datasets/snapshots', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  getArenaEvaluation: (params?: {
+    task_category?: string;
+    benchmark_version?: string;
+    dataset_split?: DatasetSplit;
+    dataset_snapshot_id?: string;
+    timeframe?: string;
+    min_resolved_samples?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.task_category) qs.set('task_category', params.task_category);
+    if (params?.benchmark_version) qs.set('benchmark_version', params.benchmark_version);
+    if (params?.dataset_split) qs.set('dataset_split', params.dataset_split);
+    if (params?.dataset_snapshot_id) qs.set('dataset_snapshot_id', params.dataset_snapshot_id);
+    if (params?.timeframe) qs.set('timeframe', params.timeframe);
+    if (params?.min_resolved_samples) qs.set('min_resolved_samples', String(params.min_resolved_samples));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<ArenaEvaluationReport>(`/api/intelligence/arena/evaluation${suffix}`);
+  },
+
+  getSettlementQueue: (params?: {
+    verification_status?: string;
+    venue?: string;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.verification_status) qs.set('verification_status', params.verification_status);
+    if (params?.venue) qs.set('venue', params.venue);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<SettlementQueueResponse>(`/api/settlement/queue${suffix}`);
+  },
+
+  fetchOfficialSettlement: (payload: {
+    venue: 'polymarket' | 'kalshi';
+    market_id: string;
+    linked_prediction_id?: string | null;
+    linked_ledger_id?: string | null;
+    secondary_venue?: 'polymarket' | 'kalshi' | null;
+    secondary_market_id?: string | null;
+  }) =>
+    apiFetch<{
+      provenance: string;
+      live_trading_enabled: boolean;
+      auto_finalized: boolean;
+      queue_item: SettlementQueueItem;
+    }>('/api/settlement/queue/fetch', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  reviewSettlementQueueItem: (
+    queueId: string,
+    payload: {
+      action: 'APPROVE' | 'REJECT' | 'MARK_DISPUTED';
+      operator_confirmed?: boolean;
+      notes?: string;
+      linked_prediction_id?: string | null;
+      linked_ledger_id?: string | null;
+    }
+  ) =>
+    apiFetch<SettlementReviewResponse>(
+      `/api/settlement/queue/${encodeURIComponent(queueId)}/review`,
       {
         method: 'POST',
         body: JSON.stringify(payload),

@@ -16,8 +16,10 @@ import type {
 } from '../types/certainty';
 import {
   canConfirmBlotterResolution,
+  formatArenaAttribution,
   formatPct,
   formatPrice,
+  formatProbPct,
   formatScoreMetric,
   formatShares,
   formatTimestampShort,
@@ -27,6 +29,7 @@ import {
 } from '../utils/formatters';
 import { ProvenanceLabel } from './ProvenanceLabel';
 import { PairReviewPanel } from './PairReviewPanel';
+import { SettlementVerificationPanel } from './SettlementVerificationPanel';
 
 interface CrossVenuePaperViewProps {
   polymarketOpportunities: ArbitrageOpportunity[];
@@ -57,6 +60,7 @@ export function CrossVenuePaperView({
 }: CrossVenuePaperViewProps) {
   const canManagePairs = permissions?.can_manage_pairs ?? true;
   const canExecutePaper = permissions?.can_execute_paper_trades ?? true;
+  const canSubmitResearch = permissions?.can_submit_research ?? true;
   const canResolveOutcomes = permissions?.can_resolve_predictions ?? canExecutePaper;
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [kalshiBook, setKalshiBook] = useState<KalshiBookSnapshotResponse | null>(null);
@@ -91,20 +95,23 @@ export function CrossVenuePaperView({
   const [blotterTab, setBlotterTab] = useState<BlotterSubTab>('orders');
   const [confirmingEntry, setConfirmingEntry] = useState<PaperPnlLedgerRecord | null>(null);
   const [selectedResolution, setSelectedResolution] = useState<'YES' | 'NO' | 'VOID'>('YES');
+  const [resolutionSource, setResolutionSource] = useState('');
   const [resolutionNotes, setResolutionNotes] = useState('');
   const [linkedPredictionId, setLinkedPredictionId] = useState('');
-  const [arenaModelId, setArenaModelId] = useState('');
   const [confirmChecked, setConfirmChecked] = useState(false);
   const [resolveBusy, setResolveBusy] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [resolveBanner, setResolveBanner] = useState<string | null>(null);
 
+  const selectedLinkedPrediction =
+    openPredictions.find((p) => p.prediction_id === linkedPredictionId) ?? null;
+
   const openConfirmModal = (entry: PaperPnlLedgerRecord) => {
     setConfirmingEntry(entry);
     setSelectedResolution('YES');
+    setResolutionSource('');
     setResolutionNotes('');
     setLinkedPredictionId('');
-    setArenaModelId('');
     setConfirmChecked(false);
     setResolveError(null);
   };
@@ -123,16 +130,18 @@ export function CrossVenuePaperView({
     try {
       const res = await certaintyApi.resolvePaperBlotterEntry(confirmingEntry.ledger_id, {
         resolution_result: selectedResolution,
+        resolution_source: resolutionSource.trim(),
         notes: resolutionNotes.trim(),
         linked_prediction_id: linkedPredictionId.trim() || null,
-        arena_model_id: arenaModelId.trim() || null,
       });
       const brierDetail =
         res.resolved_prediction && res.resolved_prediction.brier_score !== null
           ? ` · Linked forecast ${res.resolved_prediction.prediction_id} scored Brier ${formatScoreMetric(
               res.resolved_prediction.brier_score
             )}`
-          : '';
+          : res.entry.resolution_result === 'VOID'
+            ? ' · VOID excluded from Brier & mistake training'
+            : '';
       await onRefreshCrossVenue();
       setResolveBanner(
         `Confirmed ${res.entry.ledger_id} (${res.entry.pair_id}) as ${res.entry.resolution_result} · Learning Cycle ${res.learning_cycle_id} recorded${brierDetail}.`
@@ -1181,6 +1190,14 @@ export function CrossVenuePaperView({
                                     .join(' · ')}
                                 </div>
                               ) : null}
+                              {entry.resolution_source ? (
+                                <div
+                                  className="text-slate-400 truncate max-w-[240px]"
+                                  title={entry.resolution_source}
+                                >
+                                  src {entry.resolution_source}
+                                </div>
+                              ) : null}
                               {entry.resolution_notes ? (
                                 <div
                                   className="text-slate-500 font-sans truncate max-w-[240px]"
@@ -1201,6 +1218,17 @@ export function CrossVenuePaperView({
           ) : null}
         </div>
       </section>
+
+      {/* Section 4: Read-Only Official Settlement Verification & Operator Review Queue */}
+      <SettlementVerificationPanel
+        openPredictions={openPredictions}
+        pendingLedgerEntries={pnlLedger.filter(
+          (entry) => (entry.resolution_result ?? 'PENDING') === 'PENDING'
+        )}
+        canFetchSettlement={canSubmitResearch}
+        canApproveSettlement={canResolveOutcomes}
+        onSettlementFinalized={onRefreshCrossVenue}
+      />
 
       {/* Manual Outcome Confirmation Modal */}
       {confirmingEntry ? (
@@ -1253,15 +1281,18 @@ export function CrossVenuePaperView({
               </div>
 
               <div>
-                <div className="text-slate-300 font-medium mb-2">
+                <div className="text-slate-300 font-medium mb-1">
                   Actual Market Resolution Result
                 </div>
+                <p className="text-[11px] text-slate-400 mb-2">
+                  YES / NO is evaluated relative to the forecast&apos;s binary YES proposition (not paper buy/sell leg side). VOID is never scored or trained as a mistake.
+                </p>
                 <div className="grid grid-cols-3 gap-2">
                   {(
                     [
-                      ['YES', 'Resolved YES', 'border-emerald-600 bg-emerald-950/50 text-emerald-200'],
-                      ['NO', 'Resolved NO', 'border-rose-600 bg-rose-950/50 text-rose-200'],
-                      ['VOID', 'Market Voided', 'border-amber-600 bg-amber-950/50 text-amber-200'],
+                      ['YES', 'Proposition YES', 'border-emerald-600 bg-emerald-950/50 text-emerald-200'],
+                      ['NO', 'Proposition NO', 'border-rose-600 bg-rose-950/50 text-rose-200'],
+                      ['VOID', 'Void (Unscored)', 'border-amber-600 bg-amber-950/50 text-amber-200'],
                     ] as Array<['YES' | 'NO' | 'VOID', string, string]>
                   ).map(([val, desc, activeCls]) => {
                     const active = selectedResolution === val;
@@ -1287,16 +1318,16 @@ export function CrossVenuePaperView({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label htmlFor="resolve-arena-model" className="block text-slate-300 mb-1">
-                    Arena Model ID (Optional)
+                  <label htmlFor="resolve-source" className="block text-slate-300 mb-1">
+                    Settlement Source (Optional)
                   </label>
                   <input
-                    id="resolve-arena-model"
+                    id="resolve-source"
                     type="text"
-                    maxLength={120}
-                    placeholder="e.g. arena:gemini-2.5-pro"
-                    value={arenaModelId}
-                    onChange={(e) => setArenaModelId(e.target.value)}
+                    maxLength={160}
+                    placeholder="e.g. polymarket_uma_oracle"
+                    value={resolutionSource}
+                    onChange={(e) => setResolutionSource(e.target.value)}
                     className="w-full px-3 py-2 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono text-xs"
                   />
                 </div>
@@ -1315,7 +1346,7 @@ export function CrossVenuePaperView({
                       <option value="">None (blotter learning cycle only)</option>
                       {openPredictions.map((pred) => (
                         <option key={pred.prediction_id} value={pred.prediction_id}>
-                          {pred.prediction_id} · {pred.agent_id} ({(pred.predicted_prob * 100).toFixed(0)}%)
+                          {pred.prediction_id} · {pred.market_id} · {pred.agent_id} ({(pred.predicted_prob * 100).toFixed(0)}%)
                         </option>
                       ))}
                     </select>
@@ -1333,9 +1364,38 @@ export function CrossVenuePaperView({
                 </div>
               </div>
 
+              {selectedLinkedPrediction ? (
+                <div className="p-3 rounded-lg bg-[#0B111B] border border-sky-900/70 space-y-1 text-[11px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sky-300 font-semibold">
+                      Authoritative Forecast Attribution (Read-Only)
+                    </span>
+                    <span className="font-mono text-slate-300">
+                      {formatProbPct(selectedLinkedPrediction.predicted_prob)}
+                      {selectedLinkedPrediction.predicted_direction
+                        ? ` (${selectedLinkedPrediction.predicted_direction})`
+                        : ''}
+                    </span>
+                  </div>
+                  <div className="font-mono text-slate-200">
+                    Model: {formatArenaAttribution(selectedLinkedPrediction)}
+                  </div>
+                  <div className="font-mono text-slate-400">
+                    Market {selectedLinkedPrediction.market_id}
+                    {selectedLinkedPrediction.timeframe
+                      ? ` · Window ${selectedLinkedPrediction.timeframe}`
+                      : ''}
+                    {selectedLinkedPrediction.dataset_snapshot_id
+                      ? ` · Snap ${selectedLinkedPrediction.dataset_snapshot_id}`
+                      : ''}
+                  </div>
+                  <div className="text-slate-300">{selectedLinkedPrediction.question}</div>
+                </div>
+              ) : null}
+
               <div>
                 <label htmlFor="resolve-notes" className="block text-slate-300 mb-1">
-                  Settlement Source / Verification Notes (Optional)
+                  Verification Notes (Optional)
                 </label>
                 <textarea
                   id="resolve-notes"
@@ -1357,8 +1417,8 @@ export function CrossVenuePaperView({
                 />
                 <span className="leading-relaxed">
                   I manually confirm that <span className="font-mono font-semibold">{selectedResolution}</span>{' '}
-                  reflects the actual market settlement outcome. This action is final, writes a
-                  closed-loop Learning Core cycle, and does not alter Risk Gate limits.
+                  reflects the actual market settlement outcome. This atomic action is final, writes
+                  a verified Learning Core cycle, and does not alter Risk Gate limits.
                 </span>
               </label>
 

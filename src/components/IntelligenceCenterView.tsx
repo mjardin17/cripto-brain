@@ -2,24 +2,29 @@ import { useState } from 'react';
 import { Play, RotateCcw, Server, Square, Zap } from 'lucide-react';
 import { certaintyApi } from '../api/client';
 import type {
+  ArenaForecastDirection,
+  DatasetSplit,
   IntelligenceCommandCenterPayload,
   ModelProviderRegistry,
   UserPermissions,
 } from '../types/certainty';
 import {
   computeBudgetUtilizationPct,
+  formatArenaAttribution,
   formatProbPct,
   formatScoreMetric,
   formatTimestampShort,
   formatUsd,
   summarizeAgentTaskStatus,
   summarizeProviderStatus,
+  validateArenaDirectionProb,
 } from '../utils/formatters';
 import { ProvenanceLabel } from './ProvenanceLabel';
 import { CouncilPanel } from './CouncilPanel';
 import { PatternIntelligencePanel } from './PatternIntelligencePanel';
 import { FluctuationRadar } from './FluctuationRadar';
 import { OperationsStage3EPanels } from './OperationsStage3EPanels';
+import { ArenaOutOfSamplePanel } from './ArenaOutOfSamplePanel';
 
 interface IntelligenceCenterViewProps {
   data: IntelligenceCommandCenterPayload | null;
@@ -60,7 +65,8 @@ export function IntelligenceCenterView({
   const [taskPriority, setTaskPriority] = useState<number>(5);
   const [taskDedupKey, setTaskDedupKey] = useState<string>('');
 
-  // Advisory prediction form state
+  // Advisory prediction & Arena ingestion form state
+  const [forecastMode, setForecastMode] = useState<'ADVISORY' | 'ARENA'>('ADVISORY');
   const [predAgent, setPredAgent] = useState<string>('probability_research_agent');
   const [predMarketId, setPredMarketId] = useState<string>('POLY-FED-HOLD');
   const [predVenue, setPredVenue] = useState<string>('polymarket');
@@ -69,6 +75,23 @@ export function IntelligenceCenterView({
   const [predProb, setPredProb] = useState<string>('0.74');
   const [predImplied, setPredImplied] = useState<string>('0.68');
 
+  // Arena forecast ingestion fields
+  const [arenaModelId, setArenaModelId] = useState<string>('gemini-2.5-pro');
+  const [arenaProvider, setArenaProvider] = useState<string>('gemini');
+  const [arenaTaskCategory, setArenaTaskCategory] = useState<string>('prediction_market_binary');
+  const [arenaPromptVersion, setArenaPromptVersion] = useState<string>('prompt-v2');
+  const [arenaBenchmarkVersion, setArenaBenchmarkVersion] = useState<string>('bench-2026.11');
+  const [arenaMarketId, setArenaMarketId] = useState<string>('POLY-FED-HOLD');
+  const [arenaVenue, setArenaVenue] = useState<string>('polymarket');
+  const [arenaTimeframe, setArenaTimeframe] = useState<string>('2026-12-31T23:59:59Z');
+  const [arenaSnapshotId, setArenaSnapshotId] = useState<string>('SNAP-ARENA-001');
+  const [arenaProb, setArenaProb] = useState<string>('0.78');
+  const [arenaDirection, setArenaDirection] = useState<ArenaForecastDirection>('YES');
+  const [arenaDatasetSplit, setArenaDatasetSplit] = useState<DatasetSplit>('VALIDATION');
+  const [arenaRoutingScore, setArenaRoutingScore] = useState<string>('');
+  const [arenaQuestion, setArenaQuestion] = useState<string>('');
+  const [arenaRefreshTick, setArenaRefreshTick] = useState<number>(0);
+
   const runAction = async (key: string, fn: () => Promise<string>) => {
     setBusyAction(key);
     setActionError(null);
@@ -76,6 +99,7 @@ export function IntelligenceCenterView({
     try {
       const msg = await fn();
       setNotice(msg);
+      setArenaRefreshTick((n) => n + 1);
       await onRefresh();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Action failed');
@@ -699,7 +723,10 @@ export function IntelligenceCenterView({
                 ) : (
                   scorecards.scorecards.map((sc) => (
                     <tr key={sc.agent_id}>
-                      <td className="py-2 pr-3 font-mono text-slate-100 whitespace-nowrap">
+                      <td
+                        className="py-2 pr-3 font-mono text-slate-100 whitespace-nowrap max-w-[155px] truncate"
+                        title={sc.agent_id}
+                      >
                         {sc.agent_id}
                       </td>
                       <td className="py-2 pr-3 font-mono tabular-nums text-slate-300 whitespace-nowrap">
@@ -725,129 +752,399 @@ export function IntelligenceCenterView({
             </table>
           </div>
 
-          {/* Log Advisory Forecast + Quick Resolve */}
+          {/* Log Advisory Forecast or Ingest Arena Forecast */}
           <div className="pt-2 border-t border-slate-800 space-y-3">
-            <div className="text-xs font-semibold text-slate-200">
-              Log Advisory Forecast (Simulated / Research Only)
-            </div>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                void runAction('create-pred', async () => {
-                  const p = Number(predProb);
-                  const imp = predImplied.trim() ? Number(predImplied) : null;
-                  const created = await certaintyApi.createPrediction({
-                    agent_id: predAgent,
-                    market_id: predMarketId.trim(),
-                    venue: predVenue,
-                    subject_key: predSubject.trim(),
-                    question: predQuestion.trim(),
-                    predicted_prob: p,
-                    market_implied_prob: imp,
-                    provenance: 'SIMULATED',
-                  });
-                  return `Logged OPEN prediction ${created.prediction_id} (p=${created.predicted_prob.toFixed(2)}).`;
-                });
-              }}
-              className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs"
-            >
-              <div>
-                <label htmlFor="pred-agent-input" className="block text-slate-400 mb-1">
-                  Agent ID
-                </label>
-                <input
-                  id="pred-agent-input"
-                  type="text"
-                  value={predAgent}
-                  onChange={(e) => setPredAgent(e.target.value)}
-                  className="w-full px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
-                />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs font-semibold text-slate-200">
+                {forecastMode === 'ARENA'
+                  ? 'Ingest AI Orchestra Arena Forecast (Unified Prediction Ledger)'
+                  : 'Log Advisory Forecast (Simulated / Research Only)'}
               </div>
-              <div>
-                <label htmlFor="pred-market-input" className="block text-slate-400 mb-1">
-                  Market ID &amp; Venue
-                </label>
-                <div className="flex gap-1.5">
-                  <input
-                    id="pred-market-input"
-                    type="text"
-                    value={predMarketId}
-                    onChange={(e) => setPredMarketId(e.target.value)}
-                    className="flex-1 min-w-0 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
-                  />
-                  <select
-                    aria-label="Prediction venue"
-                    value={predVenue}
-                    onChange={(e) => setPredVenue(e.target.value)}
-                    className="px-2 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 shrink-0"
-                  >
-                    <option value="polymarket">polymarket</option>
-                    <option value="kalshi">kalshi</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label htmlFor="pred-prob-input" className="block text-slate-400 mb-1">
-                  Pred Prob / Implied
-                </label>
-                <div className="flex gap-1.5">
-                  <input
-                    id="pred-prob-input"
-                    type="number"
-                    step="0.01"
-                    min="0.01"
-                    max="0.99"
-                    value={predProb}
-                    onChange={(e) => setPredProb(e.target.value)}
-                    className="w-1/2 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
-                  />
-                  <input
-                    aria-label="Market implied probability"
-                    type="number"
-                    step="0.01"
-                    min="0.01"
-                    max="0.99"
-                    value={predImplied}
-                    onChange={(e) => setPredImplied(e.target.value)}
-                    className="w-1/2 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
-                  />
-                </div>
-              </div>
-              <div>
-                <label htmlFor="pred-subject-input" className="block text-slate-400 mb-1">
-                  Subject Key
-                </label>
-                <input
-                  id="pred-subject-input"
-                  type="text"
-                  value={predSubject}
-                  onChange={(e) => setPredSubject(e.target.value)}
-                  className="w-full px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
-                />
-              </div>
-              <div className="sm:col-span-2 flex flex-col sm:flex-row gap-2 sm:items-end">
-                <div className="flex-1 min-w-0">
-                  <label htmlFor="pred-question-input" className="block text-slate-400 mb-1">
-                    Market Question
-                  </label>
-                  <input
-                    id="pred-question-input"
-                    type="text"
-                    value={predQuestion}
-                    onChange={(e) => setPredQuestion(e.target.value)}
-                    className="w-full px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100"
-                  />
-                </div>
+              <div className="inline-flex rounded-lg border border-slate-700 bg-[#0B111B] p-0.5 text-[11px]">
                 <button
-                  type="submit"
-                  disabled={busyAction !== null || !canSubmitResearch}
-                  title={canSubmitResearch ? 'Record advisory prediction' : 'Requires ANALYST role or higher'}
-                  className="px-4 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg whitespace-nowrap shrink-0"
+                  type="button"
+                  onClick={() => setForecastMode('ADVISORY')}
+                  className={`px-2.5 py-1 rounded font-medium transition-colors ${
+                    forecastMode === 'ADVISORY'
+                      ? 'bg-slate-800 text-slate-100'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
                 >
-                  {canSubmitResearch ? 'Record Prediction' : 'Read-Only'}
+                  Advisory Forecast
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForecastMode('ARENA')}
+                  className={`px-2.5 py-1 rounded font-medium transition-colors ${
+                    forecastMode === 'ARENA'
+                      ? 'bg-sky-700 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Ingest Arena Forecast
                 </button>
               </div>
-            </form>
+            </div>
+
+            {forecastMode === 'ADVISORY' ? (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void runAction('create-pred', async () => {
+                    const p = Number(predProb);
+                    const imp = predImplied.trim() ? Number(predImplied) : null;
+                    const created = await certaintyApi.createPrediction({
+                      agent_id: predAgent,
+                      market_id: predMarketId.trim(),
+                      venue: predVenue,
+                      subject_key: predSubject.trim(),
+                      question: predQuestion.trim(),
+                      predicted_prob: p,
+                      market_implied_prob: imp,
+                      provenance: 'SIMULATED',
+                    });
+                    return `Logged OPEN prediction ${created.prediction_id} (p=${created.predicted_prob.toFixed(2)}).`;
+                  });
+                }}
+                className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs"
+              >
+                <div>
+                  <label htmlFor="pred-agent-input" className="block text-slate-400 mb-1">
+                    Agent ID
+                  </label>
+                  <input
+                    id="pred-agent-input"
+                    type="text"
+                    value={predAgent}
+                    onChange={(e) => setPredAgent(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="pred-market-input" className="block text-slate-400 mb-1">
+                    Market ID &amp; Venue
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      id="pred-market-input"
+                      type="text"
+                      value={predMarketId}
+                      onChange={(e) => setPredMarketId(e.target.value)}
+                      className="flex-1 min-w-0 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    />
+                    <select
+                      aria-label="Prediction venue"
+                      value={predVenue}
+                      onChange={(e) => setPredVenue(e.target.value)}
+                      className="px-2 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 shrink-0"
+                    >
+                      <option value="polymarket">polymarket</option>
+                      <option value="kalshi">kalshi</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="pred-prob-input" className="block text-slate-400 mb-1">
+                    Pred Prob / Implied
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      id="pred-prob-input"
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      max="0.99"
+                      value={predProb}
+                      onChange={(e) => setPredProb(e.target.value)}
+                      className="w-1/2 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    />
+                    <input
+                      aria-label="Market implied probability"
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      max="0.99"
+                      value={predImplied}
+                      onChange={(e) => setPredImplied(e.target.value)}
+                      className="w-1/2 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="pred-subject-input" className="block text-slate-400 mb-1">
+                    Subject Key
+                  </label>
+                  <input
+                    id="pred-subject-input"
+                    type="text"
+                    value={predSubject}
+                    onChange={(e) => setPredSubject(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                  />
+                </div>
+                <div className="sm:col-span-2 flex flex-col sm:flex-row gap-2 sm:items-end">
+                  <div className="flex-1 min-w-0">
+                    <label htmlFor="pred-question-input" className="block text-slate-400 mb-1">
+                      Market Question
+                    </label>
+                    <input
+                      id="pred-question-input"
+                      type="text"
+                      value={predQuestion}
+                      onChange={(e) => setPredQuestion(e.target.value)}
+                      className="w-full px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={busyAction !== null || !canSubmitResearch}
+                    title={canSubmitResearch ? 'Record advisory prediction' : 'Requires ANALYST role or higher'}
+                    className="px-4 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg whitespace-nowrap shrink-0"
+                  >
+                    {canSubmitResearch ? 'Record Prediction' : 'Read-Only'}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const parsedProb = Number(arenaProb);
+                  const dirErr = validateArenaDirectionProb(parsedProb, arenaDirection);
+                  if (dirErr) {
+                    setActionError(dirErr);
+                    return;
+                  }
+                  void runAction('ingest-arena', async () => {
+                    const res = await certaintyApi.ingestArenaForecast({
+                      model_id: arenaModelId.trim(),
+                      provider: arenaProvider.trim(),
+                      task_category: arenaTaskCategory.trim(),
+                      prompt_version: arenaPromptVersion.trim(),
+                      benchmark_version: arenaBenchmarkVersion.trim(),
+                      market_id: arenaMarketId.trim(),
+                      venue: arenaVenue,
+                      timeframe: arenaTimeframe.trim(),
+                      forecast_timestamp: new Date().toISOString(),
+                      dataset_snapshot_id: arenaSnapshotId.trim(),
+                      dataset_split: arenaDatasetSplit,
+                      arena_routing_score: arenaRoutingScore.trim()
+                        ? Number(arenaRoutingScore)
+                        : null,
+                      predicted_prob: parsedProb,
+                      predicted_direction: arenaDirection,
+                      question: arenaQuestion.trim(),
+                      provenance: 'LIVE',
+                    });
+                    return res.deduplicated
+                      ? `Arena forecast already ingested (${res.forecast.prediction_id}).`
+                      : `Ingested Arena forecast ${res.forecast.prediction_id} (${res.forecast.agent_id}, p=${res.forecast.predicted_prob.toFixed(2)} ${res.forecast.predicted_direction}).`;
+                  });
+                }}
+                className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs"
+              >
+                <div>
+                  <label htmlFor="arena-model-input" className="block text-slate-400 mb-1">
+                    Model ID &amp; Provider
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      id="arena-model-input"
+                      type="text"
+                      required
+                      value={arenaModelId}
+                      onChange={(e) => setArenaModelId(e.target.value)}
+                      placeholder="gemini-2.5-pro"
+                      className="flex-1 min-w-0 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    />
+                    <input
+                      id="arena-provider-input"
+                      aria-label="Arena model provider"
+                      type="text"
+                      required
+                      value={arenaProvider}
+                      onChange={(e) => setArenaProvider(e.target.value)}
+                      placeholder="gemini"
+                      className="w-24 shrink-0 px-2 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="arena-task-input" className="block text-slate-400 mb-1">
+                    Task Category
+                  </label>
+                  <input
+                    id="arena-task-input"
+                    type="text"
+                    required
+                    value={arenaTaskCategory}
+                    onChange={(e) => setArenaTaskCategory(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="arena-prompt-input" className="block text-slate-400 mb-1">
+                    Prompt / Benchmark Version
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      id="arena-prompt-input"
+                      type="text"
+                      required
+                      value={arenaPromptVersion}
+                      onChange={(e) => setArenaPromptVersion(e.target.value)}
+                      placeholder="prompt-v2"
+                      className="w-1/2 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    />
+                    <input
+                      id="arena-benchmark-input"
+                      aria-label="Arena benchmark version"
+                      type="text"
+                      required
+                      value={arenaBenchmarkVersion}
+                      onChange={(e) => setArenaBenchmarkVersion(e.target.value)}
+                      placeholder="bench-2026.11"
+                      className="w-1/2 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="arena-market-input" className="block text-slate-400 mb-1">
+                    Market ID &amp; Venue
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      id="arena-market-input"
+                      type="text"
+                      required
+                      value={arenaMarketId}
+                      onChange={(e) => setArenaMarketId(e.target.value)}
+                      className="flex-1 min-w-0 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    />
+                    <select
+                      aria-label="Arena market venue"
+                      value={arenaVenue}
+                      onChange={(e) => setArenaVenue(e.target.value)}
+                      className="px-2 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 shrink-0"
+                    >
+                      <option value="polymarket">polymarket</option>
+                      <option value="kalshi">kalshi</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="arena-timeframe-input" className="block text-slate-400 mb-1">
+                    Timeframe / Cutoff
+                  </label>
+                  <input
+                    id="arena-timeframe-input"
+                    type="text"
+                    required
+                    value={arenaTimeframe}
+                    onChange={(e) => setArenaTimeframe(e.target.value)}
+                    placeholder="2026-12-31T23:59:59Z"
+                    className="w-full px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="arena-snapshot-input" className="block text-slate-400 mb-1">
+                    Dataset Snapshot ID
+                  </label>
+                  <input
+                    id="arena-snapshot-input"
+                    type="text"
+                    required
+                    value={arenaSnapshotId}
+                    onChange={(e) => setArenaSnapshotId(e.target.value)}
+                    placeholder="SNAP-ARENA-001"
+                    className="w-full px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="arena-prob-input" className="block text-slate-400 mb-1">
+                    Predicted Prob &amp; Direction
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      id="arena-prob-input"
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      max="0.99"
+                      required
+                      value={arenaProb}
+                      onChange={(e) => setArenaProb(e.target.value)}
+                      className="w-1/2 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    />
+                    <select
+                      id="arena-direction-select"
+                      aria-label="Arena predicted direction"
+                      value={arenaDirection}
+                      onChange={(e) => setArenaDirection(e.target.value as ArenaForecastDirection)}
+                      className="w-1/2 px-2 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    >
+                      <option value="YES">YES</option>
+                      <option value="NO">NO</option>
+                      <option value="UP">UP</option>
+                      <option value="DOWN">DOWN</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="arena-split-select" className="block text-slate-400 mb-1">
+                    Dataset Split &amp; Routing Score
+                  </label>
+                  <div className="flex gap-1.5">
+                    <select
+                      id="arena-split-select"
+                      aria-label="Arena dataset split"
+                      value={arenaDatasetSplit}
+                      onChange={(e) => setArenaDatasetSplit(e.target.value as DatasetSplit)}
+                      className="w-1/2 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    >
+                      <option value="TRAIN">TRAIN</option>
+                      <option value="VALIDATION">VALIDATION</option>
+                      <option value="TEST">TEST (Quarantined)</option>
+                    </select>
+                    <input
+                      id="arena-routing-score-input"
+                      aria-label="Arena routing score diagnostic"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max="1"
+                      value={arenaRoutingScore}
+                      onChange={(e) => setArenaRoutingScore(e.target.value)}
+                      placeholder="Routing (opt)"
+                      className="w-1/2 px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100 font-mono"
+                    />
+                  </div>
+                </div>
+                <div className="sm:col-span-2 flex flex-col sm:flex-row gap-2 sm:items-end">
+                  <div className="flex-1 min-w-0">
+                    <label htmlFor="arena-question-input" className="block text-slate-400 mb-1">
+                      Question (Optional)
+                    </label>
+                    <input
+                      id="arena-question-input"
+                      type="text"
+                      value={arenaQuestion}
+                      onChange={(e) => setArenaQuestion(e.target.value)}
+                      placeholder="Binary YES proposition..."
+                      className="w-full px-2.5 py-1.5 bg-[#0B111B] border border-slate-700 rounded-lg text-slate-100"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={busyAction !== null || !canSubmitResearch}
+                    title={canSubmitResearch ? 'Ingest Arena forecast' : 'Requires ANALYST role or higher'}
+                    className="px-4 py-1.5 font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg whitespace-nowrap shrink-0"
+                  >
+                    {canSubmitResearch ? 'Ingest Arena Forecast' : 'Read-Only'}
+                  </button>
+                </div>
+              </form>
+            )}
 
             {/* Recent Predictions Resolution Table */}
             <div className="overflow-x-auto max-h-56 overflow-y-auto">
@@ -868,31 +1165,44 @@ export function IntelligenceCenterView({
                       </td>
                     </tr>
                   ) : (
-                    predictions.slice(0, 8).map((p) => (
-                      <tr key={p.prediction_id}>
-                        <td className="py-1.5 pr-2 max-w-[200px]">
-                          <div className="text-slate-200 truncate">{p.question}</div>
-                          <div className="font-mono text-[11px] text-slate-500">
-                            {p.prediction_id} · {p.provenance}
-                          </div>
-                        </td>
-                        <td className="py-1.5 pr-2 font-mono tabular-nums text-slate-200">
-                          {formatProbPct(p.predicted_prob)}
-                        </td>
-                        <td className="py-1.5 pr-2 font-mono text-[11px]">
-                          <span
-                            className={
-                              p.status === 'RESOLVED'
-                                ? 'text-emerald-400'
-                                : p.status === 'VOIDED'
-                                ? 'text-slate-400'
-                                : 'text-amber-400'
-                            }
-                          >
-                            {p.status}
-                          </span>{' '}
-                          {p.brier_score !== null ? `· Brier ${p.brier_score.toFixed(4)}` : ''}
-                        </td>
+                    predictions.slice(0, 8).map((p) => {
+                      const isArena = p.source_system === 'AI_ORCHESTRA_ARENA' || Boolean(p.model_id);
+                      return (
+                        <tr key={p.prediction_id}>
+                          <td className="py-1.5 pr-2 max-w-[230px]">
+                            <div className="text-slate-200 truncate">{p.question}</div>
+                            <div className="font-mono text-[11px] text-slate-500 truncate">
+                              {p.prediction_id} · {p.market_id} · {p.provenance}
+                            </div>
+                            {isArena ? (
+                              <div className="font-mono text-[11px] text-sky-300/90 truncate">
+                                ARENA · {formatArenaAttribution(p)}
+                                {p.dataset_snapshot_id ? ` · ${p.dataset_snapshot_id}` : ''}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="py-1.5 pr-2 font-mono tabular-nums text-slate-200 whitespace-nowrap">
+                            {formatProbPct(p.predicted_prob)}
+                            {p.predicted_direction ? (
+                              <span className="ml-1 text-[11px] text-slate-400">
+                                {p.predicted_direction}
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="py-1.5 pr-2 font-mono text-[11px]">
+                            <span
+                              className={
+                                p.status === 'RESOLVED'
+                                  ? 'text-emerald-400'
+                                  : p.status === 'VOIDED'
+                                  ? 'text-slate-400'
+                                  : 'text-amber-400'
+                              }
+                            >
+                              {p.status}
+                            </span>{' '}
+                            {p.brier_score !== null ? `· Brier ${p.brier_score.toFixed(4)}` : ''}
+                          </td>
                         <td className="py-1.5">
                           {p.status === 'OPEN' ? (
                             <div className="flex items-center gap-1">
@@ -951,8 +1261,9 @@ export function IntelligenceCenterView({
                             </span>
                           )}
                         </td>
-                      </tr>
-                    ))
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -960,6 +1271,9 @@ export function IntelligenceCenterView({
           </div>
         </section>
       </div>
+
+      {/* Section 6B: Out-of-Sample Arena Evaluation & Dataset Split Integrity */}
+      <ArenaOutOfSamplePanel refreshSignal={arenaRefreshTick} />
 
       {/* Section 7 & 8: Model Routing & Config Governance */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">

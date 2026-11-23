@@ -7,6 +7,7 @@ import {
   describeProvenance,
   describeUserRole,
   filterOpportunities,
+  formatArenaAttribution,
   formatDriverWeightMultiplier,
   formatDurationSeconds,
   formatPct,
@@ -26,6 +27,7 @@ import {
   summarizeProviderStatus,
   summarizeSolanaCandidateStatus,
   summarizeValidationStatus,
+  validateArenaDirectionProb,
 } from './formatters';
 import type { ArbitrageOpportunity } from '../types/certainty';
 
@@ -223,6 +225,32 @@ test('paper blotter resolution formatters and confirmation guard handle YES/NO/V
   assert.equal(canConfirmBlotterResolution('NO', true), false);
   assert.equal(canConfirmBlotterResolution('VOID', true), false);
 });
+
+test('Arena direction/probability consistency validator and attribution formatter behave strictly', () => {
+  assert.equal(validateArenaDirectionProb(0.82, 'YES'), null);
+  assert.equal(validateArenaDirectionProb(0.24, 'NO'), null);
+  assert.equal(validateArenaDirectionProb(0.5, 'YES'), null);
+  assert.equal(validateArenaDirectionProb(0.5, 'NO'), null);
+  assert.match(validateArenaDirectionProb(0.3, 'YES') ?? '', /conflicts/);
+  assert.match(validateArenaDirectionProb(0.7, 'NO') ?? '', /conflicts/);
+  assert.match(validateArenaDirectionProb(1.2, 'YES') ?? '', /between 0\.00 and 1\.00/);
+
+  assert.equal(
+    formatArenaAttribution({
+      agent_id: 'arena:gemini/gemini-2.5-pro',
+      provider: 'gemini',
+      model_id: 'gemini-2.5-pro',
+      benchmark_version: 'bench-2026.11',
+      prompt_version: 'prompt-v2',
+    }),
+    'gemini/gemini-2.5-pro (bench-2026.11 · prompt-v2)'
+  );
+  assert.equal(
+    formatArenaAttribution({ agent_id: 'probability_research_agent' }),
+    'probability_research_agent'
+  );
+});
+
 
 
 

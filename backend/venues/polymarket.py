@@ -183,13 +183,23 @@ class PolymarketReadOnlyClient:
                 break
         return markets
 
-    async def fetch_market(self, market_id: str) -> PolymarketBinaryMarket | None:
+    async def fetch_market_raw(self, market_id: str) -> dict[str, Any] | None:
+        """Read-only fetch of raw Gamma market payload (including closed/resolved settlement fields)."""
+        cleaned = (market_id or "").strip()
+        if not cleaned or any(ch in cleaned for ch in ("/", "?", "#", "\\", "..")):
+            raise ValueError("Invalid Polymarket market_id")
         async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=self.timeout_s) as client:
-            resp = await client.get(f"{GAMMA_BASE_URL}/markets/{market_id}")
+            resp = await client.get(f"{GAMMA_BASE_URL}/markets/{cleaned}")
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
-            raw = resp.json()
+            payload = resp.json()
+            return payload if isinstance(payload, dict) else None
+
+    async def fetch_market(self, market_id: str) -> PolymarketBinaryMarket | None:
+        raw = await self.fetch_market_raw(market_id)
+        if raw is None:
+            return None
         return parse_gamma_binary_market(raw)
 
     async def fetch_order_book(self, token_id: str) -> PolymarketBookSnapshot:

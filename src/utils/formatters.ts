@@ -529,4 +529,36 @@ export function canConfirmBlotterResolution(
   return summarizeBlotterResolution(resolutionResult).isPending;
 }
 
+export function validateArenaDirectionProb(
+  predictedProb: number,
+  direction: 'YES' | 'NO' | 'UP' | 'DOWN'
+): string | null {
+  if (!Number.isFinite(predictedProb) || predictedProb < 0 || predictedProb > 1) {
+    return 'Predicted probability must be between 0.00 and 1.00.';
+  }
+  if ((direction === 'YES' || direction === 'UP') && predictedProb < 0.5) {
+    return `Direction ${direction} conflicts with predicted probability ${predictedProb.toFixed(2)} (< 0.50).`;
+  }
+  if ((direction === 'NO' || direction === 'DOWN') && predictedProb > 0.5) {
+    return `Direction ${direction} conflicts with predicted probability ${predictedProb.toFixed(2)} (> 0.50).`;
+  }
+  return null;
+}
+
+export function formatArenaAttribution(pred: {
+  agent_id: string;
+  provider?: string | null;
+  model_id?: string | null;
+  benchmark_version?: string | null;
+  prompt_version?: string | null;
+}): string {
+  const base =
+    pred.provider && pred.model_id
+      ? `${pred.provider}/${pred.model_id}`
+      : pred.model_id || pred.agent_id;
+  const tags = [pred.benchmark_version, pred.prompt_version].filter(Boolean);
+  return tags.length > 0 ? `${base} (${tags.join(' · ')})` : base;
+}
+
+
 

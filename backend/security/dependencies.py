@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import time
 from typing import Callable
 
 from fastapi import HTTPException, Request, Response
 
 from backend.security.auth import ROLE_LEVELS, AuthManager, AuthenticatedUser
 from backend.security.config import (
+    ARENA_SERVICE_TOKEN_HEADER,
+    ARENA_SIGNATURE_HEADER,
+    ARENA_TIMESTAMP_HEADER,
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
     SESSION_COOKIE_NAME,
@@ -290,3 +296,157 @@ def make_guard(
         return user
 
     return _dependency
+
+
+def compute_arena_request_signature(
+    *,
+    hmac_secret: str,
+    timestamp_str: str,
+    body_bytes: bytes,
+) -> str:
+    """Compute canonical HMAC-SHA256 hex digest over `{timestamp}.{body}` for Arena service sync."""
+    msg = timestamp_str.encode("utf-8") + b"." + body_bytes
+    return hmac.new(hmac_secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+
+def _extract_arena_service_token(request: Request) -> str | None:
+    direct = request.headers.get(ARENA_SERVICE_TOKEN_HEADER, "").strip()
+    if direct:
+        return direct
+    auth_header = request.headers.get("authorization", "").strip()
+    if auth_header.lower().startswith("arenaservice "):
+        token = auth_header[len("arenaservice ") :].strip()
+        if token:
+            return token
+    return None
+
+
+def make_arena_ingest_guard(
+    *,
+    min_role: str = "ANALYST",
+    rate_limit_class: str = "MUTATION_GENERAL",
+    max_signature_skew_seconds: int = 300,
+) -> Callable[[Request], AuthenticatedUser]:
+    """Allow EITHER an authenticated Analyst+ session OR an authenticated AI Orchestra Arena service caller.
+
+    Service callers authenticate with `X-Arena-Service-Token` (or `Authorization: ArenaService <token>`)
+    validated in constant time against `CERTAINTY_ARENA_SERVICE_TOKEN` (>= 24 chars).
+    If `CERTAINTY_ARENA_HMAC_SECRET` is configured (or if an HMAC signature header is sent),
+    `X-Arena-Timestamp` + `X-Arena-Signature` must also match HMAC-SHA256 over `{ts}.{raw_body}`
+    within the replay window.
+    """
+    session_guard = make_guard(min_role, rate_limit_class=rate_limit_class)
+
+    async def _dependency(request: Request) -> AuthenticatedUser:
+        provided_token = _extract_arena_service_token(request)
+        if provided_token is None:
+            return session_guard(request)
+
+        settings: SecuritySettings = request.app.state.security_settings
+        auth_manager: AuthManager = request.app.state.auth_manager
+        rate_limiter: DuckDBRateLimiter = request.app.state.rate_limiter
+        client_ip = resolve_client_ip(request, settings)
+
+        # Service-to-service calls still enforce TLS in production; Origin is not required for non-browser callers.
+        enforce_tls_and_origin(
+            request,
+            settings=settings,
+            auth_manager=auth_manager,
+            require_origin_for_unsafe=False,
+        )
+
+        expected_token = settings.arena_service_token.strip()
+        if len(expected_token) < 24 or not hmac.compare_digest(provided_token, expected_token):
+            auth_manager.record_audit_event(
+                event_type="ARENA_SERVICE_AUTH_DENIED",
+                outcome="DENIED",
+                ip_address=client_ip,
+                endpoint=request.url.path,
+                method=request.method,
+                detail={"reason": "invalid_or_unconfigured_service_token"},
+            )
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or unconfigured Arena service authentication token.",
+            )
+
+        expected_hmac = settings.arena_hmac_secret.strip()
+        provided_sig = request.headers.get(ARENA_SIGNATURE_HEADER, "").strip().lower()
+        provided_ts = request.headers.get(ARENA_TIMESTAMP_HEADER, "").strip()
+        if expected_hmac or provided_sig:
+            if not expected_hmac or not provided_sig or not provided_ts:
+                auth_manager.record_audit_event(
+                    event_type="ARENA_SERVICE_AUTH_DENIED",
+                    outcome="DENIED",
+                    ip_address=client_ip,
+                    endpoint=request.url.path,
+                    method=request.method,
+                    detail={"reason": "missing_hmac_signature_or_timestamp"},
+                )
+                raise HTTPException(
+                    status_code=401,
+                    detail="Arena service request requires valid X-Arena-Timestamp and X-Arena-Signature.",
+                )
+            try:
+                ts_num = int(provided_ts)
+            except ValueError:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid X-Arena-Timestamp header.",
+                ) from None
+            if abs(int(time.time()) - ts_num) > max_signature_skew_seconds:
+                auth_manager.record_audit_event(
+                    event_type="ARENA_SERVICE_AUTH_DENIED",
+                    outcome="DENIED",
+                    ip_address=client_ip,
+                    endpoint=request.url.path,
+                    method=request.method,
+                    detail={"reason": "hmac_timestamp_outside_replay_window"},
+                )
+                raise HTTPException(
+                    status_code=401,
+                    detail="Arena service signature timestamp outside allowed replay window.",
+                )
+            body_bytes = await request.body()
+            expected_sig = compute_arena_request_signature(
+                hmac_secret=expected_hmac,
+                timestamp_str=provided_ts,
+                body_bytes=body_bytes,
+            )
+            if not hmac.compare_digest(provided_sig, expected_sig):
+                auth_manager.record_audit_event(
+                    event_type="ARENA_SERVICE_AUTH_DENIED",
+                    outcome="DENIED",
+                    ip_address=client_ip,
+                    endpoint=request.url.path,
+                    method=request.method,
+                    detail={"reason": "hmac_signature_mismatch"},
+                )
+                raise HTTPException(
+                    status_code=401,
+                    detail="Arena service HMAC signature verification failed.",
+                )
+
+        svc_user = AuthenticatedUser(
+            user_id="svc-ai-orchestra-arena",
+            username="ai_orchestra_arena",
+            email="arena-service@certainty.local",
+            role="ANALYST",
+            session_id="arena-service-token",
+            csrf_token_hash="",
+            is_active=True,
+            must_rotate_password=False,
+        )
+        enforce_rate_limit_check(
+            request,
+            rate_limiter=rate_limiter,
+            auth_manager=auth_manager,
+            settings=settings,
+            bucket_class=rate_limit_class,
+            identifier=f"service:arena:{client_ip}",
+            user=svc_user,
+        )
+        return svc_user
+
+    return _dependency
+

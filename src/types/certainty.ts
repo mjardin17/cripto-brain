@@ -750,6 +750,8 @@ export interface PaperPnlLedgerRecord {
   learning_cycle_id?: string | null;
   linked_prediction_id?: string | null;
   arena_model_id?: string | null;
+  resolution_source?: string;
+  resolution_evidence?: Array<Record<string, unknown>>;
 }
 
 export interface PaperSummary {
@@ -1005,6 +1007,207 @@ export interface PredictionRecord {
   created_at: string;
   resolved_at: string | null;
   market_category?: string;
+  source_system?: string;
+  external_forecast_id?: string | null;
+  model_id?: string | null;
+  provider?: string | null;
+  task_category?: string | null;
+  prompt_version?: string | null;
+  benchmark_version?: string | null;
+  timeframe?: string | null;
+  forecast_timestamp?: string | null;
+  dataset_snapshot_id?: string | null;
+  predicted_direction?: 'YES' | 'NO' | 'UP' | 'DOWN' | null;
+  dataset_version?: string | null;
+  snapshot_hash?: string | null;
+  dataset_split?: DatasetSplit | null;
+  dataset_window_start?: string | null;
+  dataset_window_end?: string | null;
+  arena_routing_score?: number | null;
+  benchmark_run_id?: string | null;
+}
+
+export type DatasetSplit = 'TRAIN' | 'VALIDATION' | 'TEST';
+export type ArenaForecastDirection = 'YES' | 'NO' | 'UP' | 'DOWN';
+
+export interface DatasetSnapshotRecord {
+  dataset_snapshot_id: string;
+  dataset_version: string;
+  snapshot_hash: string;
+  split: DatasetSplit;
+  window_start: string;
+  window_end: string;
+  market_scope: string;
+  description: string;
+  created_by: string;
+  created_at: string;
+  deduplicated?: boolean;
+}
+
+export interface ArenaForecastIngestPayload {
+  model_id: string;
+  provider: string;
+  task_category: string;
+  prompt_version: string;
+  benchmark_version: string;
+  market_id: string;
+  venue: string;
+  timeframe: string;
+  forecast_timestamp: string;
+  dataset_snapshot_id: string;
+  dataset_version?: string | null;
+  snapshot_hash?: string | null;
+  dataset_split?: DatasetSplit | null;
+  arena_routing_score?: number | null;
+  benchmark_run_id?: string | null;
+  require_registered_snapshot?: boolean;
+  enforce_freshness?: boolean;
+  max_snapshot_lag_hours?: number;
+  max_live_forecast_age_hours?: number;
+  predicted_prob: number;
+  predicted_direction: ArenaForecastDirection;
+  subject_key?: string | null;
+  question?: string;
+  market_implied_prob?: number | null;
+  confidence?: number;
+  rationale?: string;
+  provenance?: string;
+  external_forecast_id?: string | null;
+}
+
+export interface ArenaRoutingMetadata {
+  avg_arena_routing_score: number | null;
+  routing_sample_count: number;
+  excluded_from_verified_ranking: boolean;
+}
+
+export interface ArenaLeaderboardModel {
+  agent_id: string;
+  provider: string;
+  model_id: string;
+  task_category: string;
+  prompt_version: string;
+  benchmark_version: string;
+  timeframe?: string;
+  dataset_snapshot_id?: string;
+  dataset_split?: string;
+  resolved_count: number;
+  open_count: number;
+  voided_count: number;
+  mean_brier_score: number | null;
+  mean_log_loss: number | null;
+  expected_calibration_error?: number | null;
+  accuracy_pct: number | null;
+  comparison_eligible: boolean;
+  comparison_status: string;
+  arena_routing_metadata?: ArenaRoutingMetadata;
+}
+
+export interface ArenaForecastListResponse {
+  provenance: DataProvenance;
+  live_trading_enabled: boolean;
+  count: number;
+  forecasts: PredictionRecord[];
+  leaderboard: {
+    min_resolved_samples_required: number;
+    routing_score_excluded_from_ranking?: boolean;
+    models_count: number;
+    models: ArenaLeaderboardModel[];
+  };
+}
+
+export interface ArenaGroupMetrics {
+  resolved_count: number;
+  mean_brier_score: number | null;
+  mean_log_loss: number | null;
+  expected_calibration_error: number | null;
+  accuracy_pct: number | null;
+}
+
+export interface ArenaSameSnapshotComparison {
+  dataset_snapshot_id: string;
+  benchmark_version: string;
+  task_category: string;
+  timeframe: string;
+  dataset_split: string;
+  models_in_cohort: number;
+  matched_market_count: number;
+  min_resolved_samples_required: number;
+  comparison_eligible: boolean;
+  comparison_status: string;
+  models: Array<{
+    model_key: string;
+    verified_forecast_metrics: ArenaGroupMetrics;
+    arena_routing_metadata: ArenaRoutingMetadata;
+    rank: number | null;
+  }>;
+}
+
+export interface ArenaEvaluationReport {
+  provenance: DataProvenance;
+  live_trading_enabled: boolean;
+  min_resolved_samples_required: number;
+  routing_score_excluded_from_ranking: boolean;
+  test_split_quarantined_from_tuning: boolean;
+  leaderboard: ArenaForecastListResponse['leaderboard'];
+  by_task_category: Array<{ task_category: string } & ArenaGroupMetrics>;
+  by_timeframe: Array<{ timeframe: string } & ArenaGroupMetrics>;
+  by_split: Array<
+    {
+      dataset_split: string;
+      tuning_allowed: boolean;
+      open_count: number;
+      voided_count: number;
+    } & ArenaGroupMetrics
+  >;
+  same_snapshot_comparisons: ArenaSameSnapshotComparison[];
+  snapshots: DatasetSnapshotRecord[];
+}
+
+export type SettlementQueueStatus =
+  | 'PENDING_OPERATOR_REVIEW'
+  | 'APPROVED_AND_FINALIZED'
+  | 'DISPUTED'
+  | 'CONFLICTING_EVIDENCE'
+  | 'AMBIGUOUS'
+  | 'UNVERIFIED'
+  | 'REJECTED';
+
+export interface SettlementQueueItem {
+  queue_id: string;
+  venue: string;
+  market_id: string;
+  linked_prediction_id: string | null;
+  linked_ledger_id: string | null;
+  source_name: string;
+  proposed_outcome: 'YES' | 'NO' | 'VOID' | 'UNKNOWN';
+  verification_status: SettlementQueueStatus;
+  settlement_timestamp: string | null;
+  evidence: Record<string, unknown>;
+  conflict_reasons: string[];
+  fetched_by: string;
+  fetched_at: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  review_notes: string;
+  resolution_cycle_id: string | null;
+}
+
+export interface SettlementQueueResponse {
+  provenance: DataProvenance;
+  live_trading_enabled: boolean;
+  auto_finalize_enabled: boolean;
+  count: number;
+  status_counts: Record<string, number>;
+  items: SettlementQueueItem[];
+}
+
+export interface SettlementReviewResponse {
+  provenance: string;
+  live_trading_enabled: boolean;
+  queue_item: SettlementQueueItem;
+  blotter_resolution: PaperBlotterResolveResponse | null;
+  resolved_prediction: PredictionRecord | null;
 }
 
 export interface ModelRoutingEvent {

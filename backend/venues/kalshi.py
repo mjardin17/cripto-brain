@@ -303,11 +303,23 @@ class KalshiReadOnlyClient:
         parsed_list.sort(key=lambda m: m.volume_24h, reverse=True)
         return parsed_list[:limit]
 
-    async def fetch_market(self, ticker: str) -> KalshiBinaryMarket | None:
+    async def fetch_market_raw(self, ticker: str) -> dict[str, Any] | None:
+        """Read-only fetch of raw Kalshi v2 market payload (including finalized/settled result fields)."""
+        cleaned = (ticker or "").strip()
+        if not cleaned or any(ch in cleaned for ch in ("/", "?", "#", "\\", "..")):
+            raise ValueError("Invalid Kalshi market ticker")
         async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=self.timeout_s) as client:
-            resp = await client.get(f"{KALSHI_BASE_URL}/markets/{ticker}")
+            resp = await client.get(f"{KALSHI_BASE_URL}/markets/{cleaned}")
+            if resp.status_code == 404:
+                return None
             resp.raise_for_status()
             payload = resp.json()
+            return payload if isinstance(payload, dict) else None
+
+    async def fetch_market(self, ticker: str) -> KalshiBinaryMarket | None:
+        payload = await self.fetch_market_raw(ticker)
+        if payload is None:
+            return None
         raw_mkt = payload.get("market") or payload
         return parse_kalshi_market(raw_mkt)
 

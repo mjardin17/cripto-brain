@@ -212,6 +212,18 @@ async function proxyApiRequest(req: Request, res: Response): Promise<void> {
   if (req.headers['authorization']) {
     headers['authorization'] = String(req.headers['authorization']);
   }
+  if (req.headers['x-arena-service-token']) {
+    headers['x-arena-service-token'] = String(req.headers['x-arena-service-token']);
+  }
+  if (req.headers['x-arena-signature']) {
+    headers['x-arena-signature'] = String(req.headers['x-arena-signature']);
+  }
+  if (req.headers['x-arena-timestamp']) {
+    headers['x-arena-timestamp'] = String(req.headers['x-arena-timestamp']);
+  }
+  if (req.headers['x-idempotency-key']) {
+    headers['x-idempotency-key'] = String(req.headers['x-idempotency-key']);
+  }
   if (req.headers['origin']) {
     headers['origin'] = String(req.headers['origin']);
   }
@@ -240,7 +252,13 @@ async function proxyApiRequest(req: Request, res: Response): Promise<void> {
   }
 
   const hasBody = !['GET', 'HEAD'].includes(req.method.toUpperCase());
-  const body = hasBody && req.body !== undefined ? JSON.stringify(req.body) : undefined;
+  const rawBody = (req as Request & { rawBody?: string }).rawBody;
+  const body =
+    hasBody && rawBody && rawBody.length > 0
+      ? rawBody
+      : hasBody && req.body !== undefined
+        ? JSON.stringify(req.body)
+        : undefined;
   if (hasBody && body && !headers['content-type']) {
     headers['content-type'] = 'application/json';
   }
@@ -306,7 +324,14 @@ async function main() {
     }
     next();
   });
-  app.use(express.json({ limit: '2mb' }));
+  app.use(
+    express.json({
+      limit: '2mb',
+      verify: (req, _res, buf) => {
+        (req as Request & { rawBody?: string }).rawBody = buf.toString('utf8');
+      },
+    })
+  );
 
   app.use('/api', proxyApiRequest);
 

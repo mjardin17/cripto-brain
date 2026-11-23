@@ -6,9 +6,10 @@ import json
 import os
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import duckdb
 
@@ -28,10 +29,32 @@ class DuckDBStore:
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._in_transaction = False
         self._conn = duckdb.connect(self.db_path)
         self._init_schema()
         self._seed_initial_memory_if_empty()
         self._backfill_structured_memory_from_legacy()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Execute multi-step DuckDB mutations atomically with full rollback on any error."""
+        with self._lock:
+            if self._in_transaction:
+                yield
+                return
+            self._conn.execute("BEGIN TRANSACTION")
+            self._in_transaction = True
+            try:
+                yield
+                self._conn.execute("COMMIT")
+            except Exception:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+            finally:
+                self._in_transaction = False
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -283,7 +306,9 @@ class DuckDBStore:
                     resolved_at VARCHAR,
                     learning_cycle_id VARCHAR,
                     linked_prediction_id VARCHAR,
-                    arena_model_id VARCHAR
+                    arena_model_id VARCHAR,
+                    resolution_source VARCHAR DEFAULT '',
+                    resolution_evidence_json VARCHAR DEFAULT '[]'
                 )
                 """
             )
@@ -307,6 +332,12 @@ class DuckDBStore:
             )
             self._conn.execute(
                 "ALTER TABLE paper_pnl_ledger ADD COLUMN IF NOT EXISTS arena_model_id VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE paper_pnl_ledger ADD COLUMN IF NOT EXISTS resolution_source VARCHAR DEFAULT ''"
+            )
+            self._conn.execute(
+                "ALTER TABLE paper_pnl_ledger ADD COLUMN IF NOT EXISTS resolution_evidence_json VARCHAR DEFAULT '[]'"
             )
             # Phase 3 Stage 3B additive tables (preserve all Phase 1 & Phase 2 tables untouched)
             self._conn.execute(
@@ -548,9 +579,102 @@ class DuckDBStore:
                 )
                 """
             )
-            # Phase 3 Stage 3E additive migration & operational validation tables
+            # Phase 3 Stage 3E additive migration & Arena forecast ingestion columns on predictions
             self._conn.execute(
                 "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS market_category VARCHAR DEFAULT 'general'"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS source_system VARCHAR DEFAULT 'INTERNAL'"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS external_forecast_id VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS model_id VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS provider VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS task_category VARCHAR DEFAULT 'general'"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS prompt_version VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS benchmark_version VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS timeframe VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS forecast_timestamp VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS dataset_snapshot_id VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS predicted_direction VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS dataset_version VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS snapshot_hash VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS dataset_split VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS dataset_window_start VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS dataset_window_end VARCHAR"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS arena_routing_score DOUBLE"
+            )
+            self._conn.execute(
+                "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS benchmark_run_id VARCHAR"
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dataset_snapshots (
+                    dataset_snapshot_id VARCHAR PRIMARY KEY,
+                    dataset_version VARCHAR NOT NULL,
+                    snapshot_hash VARCHAR NOT NULL,
+                    split VARCHAR NOT NULL,
+                    window_start VARCHAR NOT NULL,
+                    window_end VARCHAR NOT NULL,
+                    market_scope VARCHAR NOT NULL,
+                    description VARCHAR NOT NULL,
+                    created_by VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS settlement_verification_queue (
+                    queue_id VARCHAR PRIMARY KEY,
+                    venue VARCHAR NOT NULL,
+                    market_id VARCHAR NOT NULL,
+                    linked_prediction_id VARCHAR,
+                    linked_ledger_id VARCHAR,
+                    source_name VARCHAR NOT NULL,
+                    proposed_outcome VARCHAR NOT NULL,
+                    verification_status VARCHAR NOT NULL,
+                    settlement_timestamp VARCHAR,
+                    evidence_json VARCHAR NOT NULL,
+                    conflict_reasons_json VARCHAR NOT NULL,
+                    fetched_by VARCHAR NOT NULL,
+                    fetched_at VARCHAR NOT NULL,
+                    reviewed_by VARCHAR,
+                    reviewed_at VARCHAR,
+                    review_notes VARCHAR NOT NULL,
+                    resolution_cycle_id VARCHAR
+                )
+                """
             )
             self._conn.execute(
                 """
@@ -1737,6 +1861,8 @@ class DuckDBStore:
 
     def record_paper_pnl(self, entry: dict[str, Any]) -> None:
         resolution_result = str(entry.get("resolution_result") or "PENDING").strip().upper()
+        res_ev = entry.get("resolution_evidence")
+        res_ev_json = json.dumps(res_ev if isinstance(res_ev, list) else [])
         with self._lock:
             self._conn.execute(
                 """
@@ -1761,9 +1887,11 @@ class DuckDBStore:
                     resolved_at,
                     learning_cycle_id,
                     linked_prediction_id,
-                    arena_model_id
+                    arena_model_id,
+                    resolution_source,
+                    resolution_evidence_json
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 [
@@ -1788,12 +1916,21 @@ class DuckDBStore:
                     entry.get("learning_cycle_id"),
                     entry.get("linked_prediction_id"),
                     entry.get("arena_model_id"),
+                    str(entry.get("resolution_source") or ""),
+                    res_ev_json,
                 ],
             )
 
     def _normalize_paper_pnl_row(self, row_dict: dict[str, Any]) -> dict[str, Any]:
         row_dict["resolution_result"] = str(row_dict.get("resolution_result") or "PENDING").upper()
         row_dict["resolution_notes"] = str(row_dict.get("resolution_notes") or "")
+        row_dict["resolution_source"] = str(row_dict.get("resolution_source") or "")
+        raw_ev = row_dict.pop("resolution_evidence_json", "[]")
+        try:
+            parsed_ev = json.loads(raw_ev) if isinstance(raw_ev, str) else raw_ev
+            row_dict["resolution_evidence"] = parsed_ev if isinstance(parsed_ev, list) else []
+        except Exception:
+            row_dict["resolution_evidence"] = []
         return row_dict
 
     def get_paper_pnl_entry(self, ledger_id: str) -> dict[str, Any] | None:
@@ -1807,6 +1944,47 @@ class DuckDBStore:
             cols = [d[0] for d in self._conn.description]
             return self._normalize_paper_pnl_row(dict(zip(cols, row)))
 
+    def get_paper_pnl_by_linked_prediction(self, prediction_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM paper_pnl_ledger WHERE linked_prediction_id = ? LIMIT 1",
+                [prediction_id],
+            ).fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in self._conn.description]
+            return self._normalize_paper_pnl_row(dict(zip(cols, row)))
+
+    def list_paper_market_refs_for_execution(self, execution_id: str, pair_id: str) -> set[str]:
+        """Collect all authoritative market identifiers tied to a paper execution & its pair."""
+        refs: set[str] = set()
+        if pair_id and pair_id.strip():
+            refs.add(pair_id.strip())
+        with self._lock:
+            pair = self.get_cross_venue_pair(pair_id)
+            if pair:
+                if pair.get("poly_market_id"):
+                    refs.add(str(pair["poly_market_id"]).strip())
+                if pair.get("kalshi_ticker"):
+                    refs.add(str(pair["kalshi_ticker"]).strip())
+            for tbl in ("paper_orders", "paper_positions"):
+                rows = self._conn.execute(
+                    f"SELECT DISTINCT market_ref FROM {tbl} WHERE execution_id = ?",
+                    [execution_id],
+                ).fetchall()
+                for (mref,) in rows:
+                    if mref and str(mref).strip():
+                        refs.add(str(mref).strip())
+        return refs
+
+    def has_learning_cycle_for_source(self, source_type: str, source_ref_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM learning_cycles WHERE source_type = ? AND source_ref_id = ?",
+                [source_type.strip().upper(), source_ref_id.strip()],
+            ).fetchone()
+            return bool(row and int(row[0] or 0) > 0)
+
     def resolve_paper_pnl_entry(
         self,
         ledger_id: str,
@@ -1818,10 +1996,13 @@ class DuckDBStore:
         learning_cycle_id: str | None = None,
         linked_prediction_id: str | None = None,
         arena_model_id: str | None = None,
+        resolution_source: str = "",
+        resolution_evidence: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         norm_result = resolution_result.strip().upper()
         if norm_result not in ("YES", "NO", "VOID"):
             raise ValueError("resolution_result must be one of YES, NO, or VOID")
+        ev_json = json.dumps(resolution_evidence if isinstance(resolution_evidence, list) else [])
         with self._lock:
             existing = self.get_paper_pnl_entry(ledger_id)
             if not existing:
@@ -1840,7 +2021,9 @@ class DuckDBStore:
                     resolved_at = ?,
                     learning_cycle_id = ?,
                     linked_prediction_id = ?,
-                    arena_model_id = ?
+                    arena_model_id = ?,
+                    resolution_source = ?,
+                    resolution_evidence_json = ?
                 WHERE ledger_id = ?
                 """,
                 [
@@ -1851,6 +2034,8 @@ class DuckDBStore:
                     learning_cycle_id,
                     linked_prediction_id,
                     arena_model_id,
+                    resolution_source.strip()[:160],
+                    ev_json,
                     ledger_id,
                 ],
             )
@@ -2261,6 +2446,215 @@ class DuckDBStore:
                 d["details"] = json.loads(d.pop("details_json", "{}"))
                 out.append(d)
             return out
+
+    # ------------------------------------------------------------------
+    # Dataset Snapshots & Split Enforcement Persistence
+    # ------------------------------------------------------------------
+    def get_dataset_snapshot(self, dataset_snapshot_id: str) -> dict[str, Any] | None:
+        cleaned = (dataset_snapshot_id or "").strip()
+        if not cleaned:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM dataset_snapshots WHERE dataset_snapshot_id = ?",
+                [cleaned],
+            ).fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in self._conn.description]
+            return dict(zip(cols, row))
+
+    def list_dataset_snapshots(
+        self,
+        *,
+        dataset_version: str | None = None,
+        split: str | None = None,
+        market_scope: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if dataset_version:
+            clauses.append("dataset_version = ?")
+            params.append(dataset_version.strip())
+        if split:
+            clauses.append("split = ?")
+            params.append(split.strip().upper())
+        if market_scope:
+            clauses.append("market_scope = ?")
+            params.append(market_scope.strip().lower())
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM dataset_snapshots {where_sql} ORDER BY window_start ASC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+    def insert_dataset_snapshot(self, snap: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO dataset_snapshots (
+                    dataset_snapshot_id, dataset_version, snapshot_hash, split,
+                    window_start, window_end, market_scope, description, created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    snap["dataset_snapshot_id"],
+                    snap["dataset_version"],
+                    snap["snapshot_hash"],
+                    snap["split"],
+                    snap["window_start"],
+                    snap["window_end"],
+                    snap["market_scope"],
+                    snap.get("description", ""),
+                    snap.get("created_by", "system"),
+                    snap.get("created_at") or utc_now_iso(),
+                ],
+            )
+            created = self.get_dataset_snapshot(snap["dataset_snapshot_id"])
+            assert created is not None
+            return created
+
+    # ------------------------------------------------------------------
+    # Settlement Verification Queue Persistence
+    # ------------------------------------------------------------------
+    def _row_to_settlement_queue_item(self, cols: list[str], row: tuple[Any, ...]) -> dict[str, Any]:
+        d = dict(zip(cols, row))
+        d["evidence"] = json.loads(d.pop("evidence_json", "{}"))
+        d["conflict_reasons"] = json.loads(d.pop("conflict_reasons_json", "[]"))
+        return d
+
+    def get_settlement_queue_item(self, queue_id: str) -> dict[str, Any] | None:
+        cleaned = (queue_id or "").strip()
+        if not cleaned:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM settlement_verification_queue WHERE queue_id = ?",
+                [cleaned],
+            ).fetchone()
+            if not row:
+                return None
+            cols = [d[0] for d in self._conn.description]
+            return self._row_to_settlement_queue_item(cols, row)
+
+    def insert_settlement_queue_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO settlement_verification_queue (
+                    queue_id, venue, market_id, linked_prediction_id, linked_ledger_id,
+                    source_name, proposed_outcome, verification_status, settlement_timestamp,
+                    evidence_json, conflict_reasons_json, fetched_by, fetched_at,
+                    reviewed_by, reviewed_at, review_notes, resolution_cycle_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    item["queue_id"],
+                    item["venue"],
+                    item["market_id"],
+                    item.get("linked_prediction_id"),
+                    item.get("linked_ledger_id"),
+                    item["source_name"],
+                    item["proposed_outcome"],
+                    item["verification_status"],
+                    item.get("settlement_timestamp"),
+                    json.dumps(item.get("evidence") or {}),
+                    json.dumps(item.get("conflict_reasons") or []),
+                    item.get("fetched_by", "system"),
+                    item.get("fetched_at") or utc_now_iso(),
+                    item.get("reviewed_by"),
+                    item.get("reviewed_at"),
+                    item.get("review_notes", ""),
+                    item.get("resolution_cycle_id"),
+                ],
+            )
+            created = self.get_settlement_queue_item(item["queue_id"])
+            assert created is not None
+            return created
+
+    def update_settlement_queue_review(
+        self,
+        queue_id: str,
+        *,
+        verification_status: str,
+        reviewed_by: str,
+        reviewed_at: str,
+        review_notes: str = "",
+        resolution_cycle_id: str | None = None,
+        conflict_reasons: list[str] | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            if conflict_reasons is not None:
+                self._conn.execute(
+                    """
+                    UPDATE settlement_verification_queue SET
+                        verification_status = ?,
+                        reviewed_by = ?,
+                        reviewed_at = ?,
+                        review_notes = ?,
+                        resolution_cycle_id = ?,
+                        conflict_reasons_json = ?
+                    WHERE queue_id = ?
+                    """,
+                    [
+                        verification_status,
+                        reviewed_by,
+                        reviewed_at,
+                        review_notes,
+                        resolution_cycle_id,
+                        json.dumps(conflict_reasons),
+                        queue_id,
+                    ],
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE settlement_verification_queue SET
+                        verification_status = ?,
+                        reviewed_by = ?,
+                        reviewed_at = ?,
+                        review_notes = ?,
+                        resolution_cycle_id = ?
+                    WHERE queue_id = ?
+                    """,
+                    [
+                        verification_status,
+                        reviewed_by,
+                        reviewed_at,
+                        review_notes,
+                        resolution_cycle_id,
+                        queue_id,
+                    ],
+                )
+            updated = self.get_settlement_queue_item(queue_id)
+            assert updated is not None
+            return updated
+
+    def list_settlement_queue(
+        self,
+        *,
+        verification_status: str | None = None,
+        venue: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if verification_status:
+            clauses.append("verification_status = ?")
+            params.append(verification_status.strip().upper())
+        if venue:
+            clauses.append("venue = ?")
+            params.append(venue.strip().lower())
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM settlement_verification_queue {where_sql} ORDER BY fetched_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            cols = [d[0] for d in self._conn.description]
+            return [self._row_to_settlement_queue_item(cols, r) for r in rows]
 
     def close(self) -> None:
         with self._lock:

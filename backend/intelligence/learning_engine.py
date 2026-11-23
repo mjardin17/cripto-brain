@@ -212,7 +212,7 @@ class LearningEngine:
         cycle_id: str,
         *,
         actual_outcome: dict[str, Any],
-        outcome_matched: bool,
+        outcome_matched: bool | None,
         evidence: list[dict[str, Any]] | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.store._lock:
@@ -224,6 +224,7 @@ class LearningEngine:
 
             merged_ev = list(cycle["evidence"]) + normalize_evidence_list(evidence)
             now_iso = utc_now_iso()
+            stored_match: bool | None = None if outcome_matched is None else bool(outcome_matched)
             self.store._conn.execute(
                 """
                 UPDATE learning_cycles SET
@@ -236,15 +237,16 @@ class LearningEngine:
                 """,
                 [
                     json.dumps(actual_outcome or {}),
-                    bool(outcome_matched),
+                    stored_match,
                     json.dumps(merged_ev),
                     now_iso,
                     cycle_id,
                 ],
             )
 
-            # Automatically log recurring mistakes into AGENT_PERF memory when expected != actual
-            if not outcome_matched:
+            # Log recurring mistakes into AGENT_PERF memory ONLY when expected != actual (explicit False).
+            # Inconclusive / VOID outcomes (outcome_matched is None) must never train mistake memory.
+            if stored_match is False:
                 self.memory.record_candidate(
                     memory_tier="AGENT_PERF",
                     category="RECURRING_MISTAKE",

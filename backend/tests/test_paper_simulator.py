@@ -526,20 +526,26 @@ def test_paper_blotter_manual_resolution_and_learning_loop():
         )
         assert dup.status_code == 409
 
-        # Confirm second entry as VOID -> recorded with outcome_matched=False
+        # Confirm second entry as VOID -> recorded with outcome_matched=None (never trains mistake memory)
         confirm2 = client.post(
             f"/api/paper/blotter/{ledger2_id}/resolve",
             json={
                 "resolution_result": "VOID",
+                "resolution_source": "kalshi_official_void_notice",
                 "notes": "Venue voided contract due to source ambiguity.",
             },
         )
         assert confirm2.status_code == 200
         c2 = confirm2.json()
         assert c2["entry"]["resolution_result"] == "VOID"
-        assert c2["learning_cycle"]["outcome_matched"] is False
+        assert c2["entry"]["resolution_source"] == "kalshi_official_void_notice"
+        assert c2["learning_cycle"]["outcome_matched"] is None
         assert c2["summary"]["resolved_entries_count"] == 2
         assert c2["summary"]["pending_resolution_count"] == 0
+        mistakes = app.state.memory_manager.list_entries(
+            memory_tier="AGENT_PERF", category="RECURRING_MISTAKE", include_archived=True
+        )
+        assert mistakes == []
 
 
 def test_paper_blotter_resolution_rbac_and_csrf_enforced():

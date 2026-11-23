@@ -224,7 +224,24 @@ class CostAwareModelRouter:
             "fallback_order": cleaned_order,
         }
 
-    def update_fallback_order(self, fallback_order: list[str], *, actor: str = "system") -> dict[str, Any]:
+    def update_fallback_order(
+        self,
+        fallback_order: list[str],
+        *,
+        actor: str = "system",
+        source_dataset_split: str | None = None,
+        source_snapshot_id: str | None = None,
+    ) -> dict[str, Any]:
+        if (source_dataset_split or "").strip().upper() == "TEST":
+            raise PermissionError(
+                "TEST-set contamination blocked: TEST split metrics cannot be used to tune model routing"
+            )
+        if source_snapshot_id:
+            snap = self.store.get_dataset_snapshot(source_snapshot_id)
+            if snap and str(snap.get("split") or "").upper() == "TEST":
+                raise PermissionError(
+                    f"TEST-set contamination blocked: snapshot '{source_snapshot_id}' belongs to TEST split"
+                )
         cleaned = []
         for item in fallback_order:
             p_id = str(item).strip().lower()
